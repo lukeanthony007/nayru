@@ -1,110 +1,52 @@
-# 🧙‍♂️ Dynamic Server App Template
+## Description
 
-A powerful, type-safe, schema-driven dynamic server framework built on **Bun** + **Zod**. Extend this abstract class to build highly customizable backend apps with introspectable state, CLI control, and auto-routed HTTP methods.
+A multi-provider text-to-speech service with audio queue management, provider abstraction, and dynamic server control via CLI or HTTP API.
 
-## ✨ Features
+## Skills / Tools / Stack
 
-- 🧠 State introspection & dynamic updates
-- 🛡️ Zod-validated schema binding
-- ⚙️ Built-in HTTP JSON API (`/state`, `/method`)
-- 🧪 Probes for live server detection
-- 📟 CLI flags to get/set server state directly
-- 🧬 Auto-routing of class methods as endpoints
+- TypeScript
+- Azure Speech Services
+- Google Cloud TTS
+- Bun Runtime
+- API Development
 
-## 📦 Tech Stack
+# Summary
 
-- [Bun](https://bun.sh)
-- [Zod](https://zod.dev)
+Nayru is a text-to-speech service that abstracts multiple TTS providers behind a unified interface. Point it at Azure, Google, or a mock provider for testing—the application code stays the same.
 
-## 🔧 Usage
+The architecture follows a dynamic server app pattern. Run it as a persistent service with HTTP endpoints, or control it via CLI flags for scripted workflows. Audio queue management handles sequential playback without blocking.
 
-### 1. Extend the `DynamicServerApp`
+Built as infrastructure for voice-enabled applications. Integrate with voice assistants, accessibility tools, or any system that needs text converted to speech with provider flexibility.
 
-```ts
-import { z } from "zod";
-import { DynamicServerApp } from "./app";
+## Features
 
-export class SampleClass extends DynamicServerApp<z.infer<typeof SampleClass.schema>> {
-  static schema = z.object({
-    port: z.number(),
-    message: z.string(),
-  });
+- Multi-provider TTS abstraction with Azure and Google backends
+- Audio queue management with sequential playback
+- Dynamic server app framework—CLI and HTTP control
+- Wayland clipboard integration for reading selected text
+- Zod-validated schema binding for type-safe configuration
+- Auto-exposed class methods as HTTP endpoints
+- Provider selection via environment variable
+- Mock TTS provider for testing without API keys
+- Graceful error handling with fallback behavior
+- Bun runtime for fast startup and low overhead
 
-  schema = SampleClass.schema;
-  port = 1996;
-  message = "Hello, world!";
+### Roadmap
 
-  async sampleFunction(): Promise<void> {
-    console.log(this.message);
-  }
-}
-````
+1. Add ElevenLabs provider for high-quality voice synthesis
+2. Implement voice caching to reduce API calls
+3. Build SSML support for pronunciation control
+4. Create queue inspection and manipulation endpoints
+5. Add streaming output for long-form text
 
-### 2. Run the App
+### Instructions
 
-```ts
-import { runDynamicApp } from "./app";
-import { SampleClass } from "./SampleClass";
+1. Clone the repository and install dependencies with `bun install`
+2. Set `TTS_PROVIDER` environment variable to `azure`, `google`, or `mock`
+3. Configure provider-specific credentials in environment variables
+4. Start the service with `bun run start`
+5. Use CLI commands or HTTP API to queue text for speech
 
-runDynamicApp(new SampleClass());
-```
+### License
 
-## 🖥️ API Endpoints
-
-| Endpoint         | Method | Description                            |
-| ---------------- | ------ | -------------------------------------- |
-| `/state`         | GET    | Fetch current application state        |
-| `/state`         | POST   | Update application state via JSON      |
-| `/<method-name>` | POST   | Auto-exposed instance methods via path |
-
-## 🧪 CLI Flags
-
-| Flag          | Description                     |
-| ------------- | ------------------------------- |
-| `--key value` | Set a state field (with `-set`) |
-| `-get --key`  | Display current key value(s)    |
-| `-set --key`  | Set key state                   |
-
-## 🚀 Server Lifecycle
-
-1. If CLI `-get`/`-set` provided → runs as command client.
-2. If server not detected → spins up new Bun HTTP server.
-3. Auto-routes all non-constructor methods as POST endpoints.
-
-## 🧠 Method Routing Example
-
-```ts
-// Call this remotely:
-await fetch('/sampleFunction', { method: 'POST' });
-```
-
-## 📚 Schema Validation
-
-All state changes and updates are type-checked and validated using the provided `ZodObject` schema. Automatically supports partial updates.
-
-## 🧙‍♂️ CLI to State
-
-CLI state parsing supports dynamic mutation via `--key value` syntax. Use `-get` to fetch specific keys, `-set` to apply.
-
-## 🛠️ Development & Deployment
-
-To run locally:
-
-```bash
-bun run index.ts
-```
-
-To deploy, consider:
-
-* 📦 [Replit](https://replit.com/)
-* 🌐 [Netlify Drop](https://app.netlify.com/drop)
-* 🧳 Or containerize with Docker
-
-## 🔐 Type Safety
-
-Powered by `z.infer<typeof schema>` — state and routes are always strictly typed.
-
-## 🧩 Extensibility
-
-* Add any methods → automatically exposed as API routes.
-* Add more fields to the Zod schema → instantly supported in state.
+MIT
