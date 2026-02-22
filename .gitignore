@@ -1,5 +1,2 @@
-.env
-node_modules/
-.env
-
-/core/.app-state-*.json
+/target
+Cargo.lock

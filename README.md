@@ -1,52 +1,89 @@
-## Description
+# nayru
 
-A multi-provider text-to-speech service with audio queue management, provider abstraction, and dynamic server control via CLI or HTTP API.
+Voice server — send text in, get speech out. Handles the full pipeline: text cleaning, sentence splitting, Kokoro TTS synthesis, and native audio playback via rodio. Run it as an HTTP server and control it from any app, or use the CLI directly.
 
-## Skills / Tools / Stack
+## Architecture
 
-- TypeScript
-- Azure Speech Services
-- Google Cloud TTS
-- Bun Runtime
-- API Development
+Three-task actor pipeline connected by bounded channels:
 
-# Summary
+```
+text → clean/split/merge → POST Kokoro /v1/audio/speech → rodio Sink playback
+         (Task 1)                  (Task 2)                  (Task 3, OS thread)
+```
 
-Nayru is a text-to-speech service that abstracts multiple TTS providers behind a unified interface. Point it at Azure, Google, or a mock provider for testing—the application code stays the same.
+- **Text processing** — strips markdown (code blocks, tables, bold, headings, links, lists), splits at sentence boundaries, merges small chunks for fewer API calls
+- **Kokoro fetcher** — concurrent WAV fetches from local Kokoro TTS (OpenAI-compatible API)
+- **Playback** — rodio on a dedicated OS thread for gapless audio scheduling
+- **Epoch-based cancellation** — `stop()` bumps an atomic counter, all in-flight work for the previous epoch is silently discarded
 
-The architecture follows a dynamic server app pattern. Run it as a persistent service with HTTP endpoints, or control it via CLI flags for scripted workflows. Audio queue management handles sequential playback without blocking.
+## Requirements
 
-Built as infrastructure for voice-enabled applications. Integrate with voice assistants, accessibility tools, or any system that needs text converted to speech with provider flexibility.
+- [Kokoro TTS](https://github.com/remsky/Kokoro-FastAPI) running on port 8880 (OpenAI-compatible `/v1/audio/speech` endpoint)
+- Audio output device (ALSA/PulseAudio/PipeWire on Linux, CoreAudio on macOS)
 
-## Features
+## Usage
 
-- Multi-provider TTS abstraction with Azure and Google backends
-- Audio queue management with sequential playback
-- Dynamic server app framework—CLI and HTTP control
-- Wayland clipboard integration for reading selected text
-- Zod-validated schema binding for type-safe configuration
-- Auto-exposed class methods as HTTP endpoints
-- Provider selection via environment variable
-- Mock TTS provider for testing without API keys
-- Graceful error handling with fallback behavior
-- Bun runtime for fast startup and low overhead
+### Server mode
 
-### Roadmap
+```bash
+# Start the voice server (default: 127.0.0.1:2003)
+nayru serve
 
-1. Add ElevenLabs provider for high-quality voice synthesis
-2. Implement voice caching to reduce API calls
-3. Build SSML support for pronunciation control
-4. Create queue inspection and manipulation endpoints
-5. Add streaming output for long-form text
+# With options
+nayru serve --port 2003 --voice af_jadzia --kokoro-url http://localhost:8880 --speed 1.0
+```
 
-### Instructions
+### Client commands
 
-1. Clone the repository and install dependencies with `bun install`
-2. Set `TTS_PROVIDER` environment variable to `azure`, `google`, or `mock`
-3. Configure provider-specific credentials in environment variables
-4. Start the service with `bun run start`
-5. Use CLI commands or HTTP API to queue text for speech
+```bash
+# Send text to speak
+nayru speak "Hello, this is nayru."
 
-### License
+# Control playback
+nayru stop      # Stop all speech, clear queue
+nayru skip      # Skip current clip
+nayru pause     # Pause playback
+nayru resume    # Resume playback
+nayru status    # Get current state
+```
+
+### HTTP API
+
+All endpoints served on port 2003 with permissive CORS.
+
+| Endpoint  | Method | Body                                     | Response                              |
+|-----------|--------|------------------------------------------|---------------------------------------|
+| `/speak`  | POST   | `{"text": "...", "voice": "af_jadzia"}`  | `{"ok": true, "queued_chunks": 3}`    |
+| `/stop`   | POST   | —                                        | `{"ok": true}`                        |
+| `/skip`   | POST   | —                                        | `{"ok": true}`                        |
+| `/pause`  | POST   | —                                        | `{"ok": true}`                        |
+| `/resume` | POST   | —                                        | `{"ok": true}`                        |
+| `/status` | GET    | —                                        | `{"state": "playing", "queue_length": 2, "voice": "af_jadzia"}` |
+
+```bash
+curl -X POST localhost:2003/speak -H 'Content-Type: application/json' -d '{"text":"Hello from curl"}'
+curl localhost:2003/status
+```
+
+### As a library
+
+```rust
+use nayru::tts::{TtsEngine, TtsConfig};
+
+let engine = TtsEngine::new(TtsConfig::default());
+engine.speak("Hello world.");
+engine.status();  // TtsStatus { state: Playing, queue_length: 0, voice: "af_jadzia" }
+engine.stop();
+```
+
+## Building
+
+```bash
+cargo build --release
+```
+
+The binary is at `target/release/nayru`.
+
+## License
 
 MIT

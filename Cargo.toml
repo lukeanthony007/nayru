@@ -1,0 +1,49 @@
+[package]
+name = "nayru"
+version = "0.1.0"
+edition = "2024"
+authors = ["Lucas <lucas@amio.dev>"]
+license = "MIT"
+repository = "https://github.com/ln64-git/nayru"
+description = "Voice server — TTS playback, STT capture, audio pipeline"
+
+[lib]
+name = "nayru"
+
+[[bin]]
+name = "nayru"
+path = "src/main.rs"
+
+[dependencies]
+# Async
+tokio = { version = "1", features = ["full", "sync"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
+
+# Audio
+cpal = "0.15"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Async utilities
+futures-util = "0.3"
+
+# TTS playback
+rodio = { version = "0.20", default-features = false, features = ["wav"] }
+
+# HTTP server
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+
+# Text processing
+regex = "1"
