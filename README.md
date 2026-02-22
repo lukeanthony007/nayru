@@ -1,10 +1,18 @@
-# nayru
+## Description
 
-Voice server — send text in, get speech out. Handles the full pipeline: text cleaning, sentence splitting, Kokoro TTS synthesis, and native audio playback via rodio. Run it as an HTTP server and control it from any app, or use the CLI directly.
+Standalone voice server that turns text into speech. Any application sends text over HTTP or CLI — nayru cleans it, splits it into natural sentences, synthesizes audio through Kokoro TTS, and plays it back natively with gapless sequencing. Built as infrastructure for voice-enabled applications where the caller shouldn't have to think about audio pipelines.
 
-## Architecture
+## Stack / Tools
 
-Three-task actor pipeline connected by bounded channels:
+- Rust
+- Kokoro TTS (OpenAI-compatible API)
+- rodio (audio playback)
+- HTTP API / CLI
+- Native audio (ALSA/PulseAudio/PipeWire, CoreAudio)
+
+# Summary
+
+Nayru is a voice server built as a three-task actor pipeline connected by bounded channels:
 
 ```
 text → clean/split/merge → POST Kokoro /v1/audio/speech → rodio Sink playback
@@ -16,10 +24,26 @@ text → clean/split/merge → POST Kokoro /v1/audio/speech → rodio Sink playb
 - **Playback** — rodio on a dedicated OS thread for gapless audio scheduling
 - **Epoch-based cancellation** — `stop()` bumps an atomic counter, all in-flight work for the previous epoch is silently discarded
 
-## Requirements
+## Features
 
-- [Kokoro TTS](https://github.com/remsky/Kokoro-FastAPI) running on port 8880 (OpenAI-compatible `/v1/audio/speech` endpoint)
-- Audio output device (ALSA/PulseAudio/PipeWire on Linux, CoreAudio on macOS)
+- Text-to-speech pipeline with markdown stripping and sentence splitting
+- Kokoro TTS backend (local, OpenAI-compatible `/v1/audio/speech`)
+- Audio queue with gapless playback via rodio
+- HTTP server (default port 2003) with permissive CORS
+- CLI: `speak`, `stop`, `skip`, `pause`, `resume`, `status`
+- Embeddable as a Rust library
+- Configurable voice, speed, and Kokoro URL
+
+### Instructions
+
+1. Run [Kokoro TTS](https://github.com/remsky/Kokoro-FastAPI) on port 8880 (OpenAI-compatible `/v1/audio/speech` endpoint)
+2. Ensure an audio output device is available (ALSA/PulseAudio/PipeWire on Linux, CoreAudio on macOS)
+3. Build with `cargo build --release` (binary at `target/release/nayru`)
+4. Start the server with `nayru serve` or use the CLI / HTTP API
+
+### License
+
+MIT
 
 ## Usage
 
@@ -76,14 +100,10 @@ engine.status();  // TtsStatus { state: Playing, queue_length: 0, voice: "af_jad
 engine.stop();
 ```
 
-## Building
+### Building
 
 ```bash
 cargo build --release
 ```
 
 The binary is at `target/release/nayru`.
-
-## License
-
-MIT
