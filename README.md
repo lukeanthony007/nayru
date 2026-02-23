@@ -5,29 +5,26 @@ Standalone voice server that turns text into speech. Any application sends text 
 ## Stack / Tools
 
 - Rust
-- Kokoro TTS (OpenAI-compatible API)
+- [Kokoros](https://github.com/lucasjinreal/Kokoros) (Rust-native Kokoro TTS, ONNX, OpenAI-compatible API)
 - rodio (audio playback)
 - HTTP API / CLI
 - Native audio (ALSA/PulseAudio/PipeWire, CoreAudio)
 
-# Summary
+## How it works
 
-Nayru is a voice server built as a three-task actor pipeline connected by bounded channels:
+You send text, nayru handles the rest. Under the hood:
 
-```
-text → clean/split/merge → POST Kokoro /v1/audio/speech → rodio Sink playback
-         (Task 1)                  (Task 2)                  (Task 3, OS thread)
-```
+1. **Clean & split** — Markdown is stripped (code blocks, bold, headings, links, etc.) and the text is broken into individual sentences.
+2. **Synthesize** — Each sentence is sent to a local Kokoro TTS server. Two workers run in parallel: while one streams the current sentence's audio to speakers, the other is already fetching the next sentence. This means the first audio plays in under a second, and subsequent sentences are ready by the time the previous one finishes.
+3. **Play** — Raw PCM audio streams directly into a native audio sink (rodio) for gapless playback. No files, no buffering the whole response.
 
-- **Text processing** — strips markdown (code blocks, tables, bold, headings, links, lists), splits at sentence boundaries, merges small chunks for fewer API calls
-- **Kokoro fetcher** — concurrent WAV fetches from local Kokoro TTS (OpenAI-compatible API)
-- **Playback** — rodio on a dedicated OS thread for gapless audio scheduling
-- **Epoch-based cancellation** — `stop()` bumps an atomic counter, all in-flight work for the previous epoch is silently discarded
+Stopping is instant — a single atomic counter invalidates all in-flight work.
 
 ## Features
 
 - Text-to-speech pipeline with markdown stripping and sentence splitting
 - Kokoro TTS backend (local, OpenAI-compatible `/v1/audio/speech`)
+- PCM streaming with pipelined prefetch (~0.3-0.9s time-to-first-audio)
 - Audio queue with gapless playback via rodio
 - HTTP server (default port 2003) with permissive CORS
 - CLI: `speak`, `stop`, `skip`, `pause`, `resume`, `status`
@@ -36,7 +33,14 @@ text → clean/split/merge → POST Kokoro /v1/audio/speech → rodio Sink playb
 
 ### Instructions
 
-1. Run [Kokoro TTS](https://github.com/remsky/Kokoro-FastAPI) on port 8880 (OpenAI-compatible `/v1/audio/speech` endpoint)
+1. Install and run [Kokoros](https://github.com/lucasjinreal/Kokoros) on port 3001:
+   ```bash
+   git clone https://github.com/lucasjinreal/Kokoros.git
+   cd Kokoros
+   bash download_all.sh
+   cargo build --release
+   ./target/release/koko --instances 1 openai --port 3001
+   ```
 2. Ensure an audio output device is available (ALSA/PulseAudio/PipeWire on Linux, CoreAudio on macOS)
 3. Build with `cargo build --release` (binary at `target/release/nayru`)
 4. Start the server with `nayru serve` or use the CLI / HTTP API
@@ -54,7 +58,7 @@ MIT
 nayru serve
 
 # With options
-nayru serve --port 2003 --voice af_jadzia --kokoro-url http://localhost:8880 --speed 1.0
+nayru serve --port 2003 --voice af_heart --kokoro-url http://localhost:3001 --speed 1.0
 ```
 
 ### Client commands
@@ -75,14 +79,14 @@ nayru status    # Get current state
 
 All endpoints served on port 2003 with permissive CORS.
 
-| Endpoint  | Method | Body                                     | Response                              |
-|-----------|--------|------------------------------------------|---------------------------------------|
-| `/speak`  | POST   | `{"text": "...", "voice": "af_jadzia"}`  | `{"ok": true, "queued_chunks": 3}`    |
-| `/stop`   | POST   | —                                        | `{"ok": true}`                        |
-| `/skip`   | POST   | —                                        | `{"ok": true}`                        |
-| `/pause`  | POST   | —                                        | `{"ok": true}`                        |
-| `/resume` | POST   | —                                        | `{"ok": true}`                        |
-| `/status` | GET    | —                                        | `{"state": "playing", "queue_length": 2, "voice": "af_jadzia"}` |
+| Endpoint  | Method | Body                                   | Response                              |
+|-----------|--------|----------------------------------------|---------------------------------------|
+| `/speak`  | POST   | `{"text": "...", "voice": "af_heart"}` | `{"ok": true, "queued_chunks": 3}`    |
+| `/stop`   | POST   | —                                      | `{"ok": true}`                        |
+| `/skip`   | POST   | —                                      | `{"ok": true}`                        |
+| `/pause`  | POST   | —                                      | `{"ok": true}`                        |
+| `/resume` | POST   | —                                      | `{"ok": true}`                        |
+| `/status` | GET    | —                                      | `{"state": "playing", "queue_length": 2, "voice": "af_heart"}` |
 
 ```bash
 curl -X POST localhost:2003/speak -H 'Content-Type: application/json' -d '{"text":"Hello from curl"}'
@@ -96,7 +100,7 @@ use nayru::tts::{TtsEngine, TtsConfig};
 
 let engine = TtsEngine::new(TtsConfig::default());
 engine.speak("Hello world.");
-engine.status();  // TtsStatus { state: Playing, queue_length: 0, voice: "af_jadzia" }
+engine.status();  // TtsStatus { state: Playing, queue_length: 0, voice: "af_heart" }
 engine.stop();
 ```
 
