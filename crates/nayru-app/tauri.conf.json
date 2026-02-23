@@ -4,10 +4,10 @@
   "version": "0.1.0",
   "identifier": "dev.anima.nayru",
   "build": {
-    "beforeDevCommand": "cd src/nayru-app && bun run dev",
+    "beforeDevCommand": "cd nayru-app && bun run dev",
     "devUrl": "http://localhost:3002",
-    "beforeBuildCommand": "cd src/nayru-app && bun run build",
-    "frontendDist": "../../src/nayru-app/out"
+    "beforeBuildCommand": "cd nayru-app && bun run build",
+    "frontendDist": "../../nayru-app/out"
   },
   "app": {
     "windows": [

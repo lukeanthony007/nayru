@@ -5,7 +5,8 @@ use std::sync::Arc;
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
-use nayru_core::types::{DownloadProgress, ServiceStatus, VoiceServicesStatus, KOKORO_MODEL, WHISPER_MODEL};
+pub use nayru_core::types::{ServiceStatus, VoiceServicesStatus};
+use nayru_core::types::{DownloadProgress, KOKORO_MODEL, WHISPER_MODEL};
 
 use crate::download;
 

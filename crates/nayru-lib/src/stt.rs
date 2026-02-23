@@ -5,8 +5,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use nayru_core::types::{SttListenEvent, SttResponse};
-use nayru_core::wav::{compute_rms, validate_stt_model, write_wav, SAMPLE_RATE};
+pub use nayru_core::types::{SttListenEvent, SttResponse};
+pub use nayru_core::wav::{validate_stt_model, write_wav, SAMPLE_RATE};
+use nayru_core::wav::compute_rms;
 
 use crate::capture::AudioCapture;
 

@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 
-use nayru_core::types::{DownloadProgress, ModelInfo, KOKORO_MODEL, WHISPER_MODEL};
+pub use nayru_core::types::{DownloadProgress, ModelInfo, KOKORO_MODEL, WHISPER_MODEL};
 
 /// Check if a model file exists under the given models directory
 pub fn model_exists(models_dir: &std::path::Path, model: &ModelInfo) -> bool {
