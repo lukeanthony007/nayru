@@ -2,6 +2,34 @@
  * Tauri IPC wrappers for TTS commands.
  */
 
+export type ServerPhase =
+  | "checking"
+  | "installing"
+  | "downloading"
+  | "starting"
+  | "ready"
+  | "error";
+
+export interface ServerStartupEvent {
+  phase: ServerPhase;
+  message: string;
+  progress: number | null;
+}
+
+export async function onServerStartup(
+  callback: (event: ServerStartupEvent) => void,
+): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  const unlisten = await listen<ServerStartupEvent>("server-startup", (e) =>
+    callback(e.payload),
+  );
+  return unlisten;
+}
+
+export async function getServerStatus(): Promise<boolean> {
+  return invoke<boolean>("get_server_status");
+}
+
 export interface ReaderStatus {
   state: "idle" | "converting" | "playing";
   current_sentence_index: number | null;

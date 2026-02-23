@@ -84,9 +84,16 @@ pub const WHISPER_MODEL: ModelInfo = ModelInfo {
 
 pub const KOKORO_MODEL: ModelInfo = ModelInfo {
     name: "kokoro",
-    filename: "kokoro-v1.0-int8.onnx",
-    url: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_quantized.onnx",
-    expected_size: 88_000_000,
+    filename: "kokoro-v1.0.onnx",
+    url: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
+    expected_size: 326_000_000,
+};
+
+pub const KOKORO_VOICES: ModelInfo = ModelInfo {
+    name: "kokoro-voices",
+    filename: "voices-v1.0.bin",
+    url: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+    expected_size: 5_200_000,
 };
 
 /// Download progress payload.
@@ -98,6 +105,18 @@ pub struct DownloadProgress {
     pub bytes_done: u64,
     pub bytes_total: u64,
     pub status: String, // "downloading" | "complete" | "error"
+}
+
+// ─── Server startup event ─────────────────────────────────────────────────
+
+/// Event emitted to the frontend during the Kokoro server startup sequence.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerStartupEvent {
+    /// "checking" | "installing" | "downloading" | "starting" | "ready" | "error"
+    pub phase: String,
+    pub message: String,
+    pub progress: Option<f32>,
 }
 
 // ─── Service types ─────────────────────────────────────────────────────────

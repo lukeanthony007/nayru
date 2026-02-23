@@ -6,12 +6,12 @@ use tokio::process::Child;
 use tokio::sync::Mutex;
 
 pub use nayru_core::types::{ServiceStatus, VoiceServicesStatus};
-use nayru_core::types::{DownloadProgress, KOKORO_MODEL, WHISPER_MODEL};
+use nayru_core::types::{DownloadProgress, KOKORO_MODEL, KOKORO_VOICES, WHISPER_MODEL};
 
 use crate::download;
 
 const WHISPER_SIDECAR: &str = "whisper-server";
-const KOKORO_SIDECAR: &str = "kokoro-server";
+const KOKORO_SIDECAR: &str = "koko";
 
 const WHISPER_PORT: u16 = 2022;
 const KOKORO_PORT: u16 = 3001;
@@ -71,13 +71,45 @@ impl VoiceServiceManager {
         }
 
         if !self.is_running(&self.kokoro).await {
-            self.start_kokoro(&kokoro_model).await?;
+            let voices = download::model_path(models_dir, &KOKORO_VOICES);
+            self.start_kokoro(&kokoro_model, &voices).await?;
         }
 
         self.wait_for_health(WHISPER_PORT, "whisper", 15).await?;
         self.wait_for_health(KOKORO_PORT, "kokoro", 30).await?;
 
         Ok(())
+    }
+
+    /// Start only the Kokoro TTS server (download model + voices + spawn + health check).
+    pub async fn start_kokoro_only(
+        &self,
+        models_dir: &Path,
+        on_progress: impl Fn(DownloadProgress),
+    ) -> Result<(), String> {
+        let kokoro_model =
+            download::download_model(models_dir, &KOKORO_MODEL, &on_progress).await?;
+        let kokoro_voices =
+            download::download_model(models_dir, &KOKORO_VOICES, &on_progress).await?;
+
+        if !self.is_running(&self.kokoro).await {
+            self.start_kokoro(&kokoro_model, &kokoro_voices).await?;
+        }
+
+        self.wait_for_health(KOKORO_PORT, "kokoro", 60).await?;
+
+        Ok(())
+    }
+
+    /// Check if the Kokoro port is already responding.
+    pub async fn is_kokoro_reachable(&self) -> bool {
+        let client = reqwest::Client::new();
+        client
+            .get(format!("http://127.0.0.1:{KOKORO_PORT}/"))
+            .timeout(std::time::Duration::from_secs(1))
+            .send()
+            .await
+            .is_ok()
     }
 
     pub async fn stop(&self) {
@@ -91,6 +123,15 @@ impl VoiceServiceManager {
                 let _ = svc.child.start_kill();
             }
         }
+        if let Ok(mut guard) = self.kokoro.try_lock() {
+            if let Some(mut svc) = guard.take() {
+                let _ = svc.child.start_kill();
+            }
+        }
+    }
+
+    /// Synchronously kill only the Kokoro server process.
+    pub fn stop_kokoro_sync(&self) {
         if let Ok(mut guard) = self.kokoro.try_lock() {
             if let Some(mut svc) = guard.take() {
                 let _ = svc.child.start_kill();
@@ -119,15 +160,38 @@ impl VoiceServiceManager {
         Ok(())
     }
 
-    async fn start_kokoro(&self, model_path: &PathBuf) -> Result<(), String> {
+    async fn start_kokoro(
+        &self,
+        model_path: &PathBuf,
+        voices_path: &PathBuf,
+    ) -> Result<(), String> {
         let binary = self.resolve_sidecar(KOKORO_SIDECAR)?;
 
+        // Ensure onnxruntime.dll is findable — place it next to the binary
+        if let Some(binary_dir) = binary.parent() {
+            let ort_dll = binary_dir.join("onnxruntime.dll");
+            if !ort_dll.exists() {
+                // Also check the exe directory
+                if let Ok(exe) = std::env::current_exe() {
+                    if let Some(exe_dir) = exe.parent() {
+                        let exe_ort = exe_dir.join("onnxruntime.dll");
+                        if exe_ort.exists() && !ort_dll.exists() {
+                            let _ = std::fs::copy(&exe_ort, &ort_dll);
+                        }
+                    }
+                }
+            }
+        }
+
+        // koko CLI: koko --model <path> --data <voices> openai --ip 127.0.0.1 --port 3001
         let child = tokio::process::Command::new(&binary)
             .args([
-                "openai",
                 "--model",
                 &model_path.to_string_lossy(),
-                "--host",
+                "--data",
+                &voices_path.to_string_lossy(),
+                "openai",
+                "--ip",
                 "127.0.0.1",
                 "--port",
                 &KOKORO_PORT.to_string(),
@@ -135,7 +199,7 @@ impl VoiceServiceManager {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| format!("failed to spawn kokoro-server: {e}"))?;
+            .map_err(|e| format!("failed to spawn koko: {e}"))?;
 
         Self::drain_stderr(child, "kokoro", &self.kokoro).await;
         Ok(())
@@ -154,7 +218,7 @@ impl VoiceServiceManager {
                 use tokio::io::{AsyncBufReadExt, BufReader};
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    eprintln!("[{name_log}] {line}");
+                    tracing::debug!("[{name_log}] {line}");
                 }
             });
         }
@@ -174,16 +238,26 @@ impl VoiceServiceManager {
             .ok_or_else(|| "executable has no parent directory".to_string())?;
 
         let triple = target_triple();
+
+        // Check for bundled sidecar with triple suffix (Tauri convention)
         let with_triple = exe_dir.join(format!("{name}-{triple}"));
         if with_triple.is_file() {
             return Ok(with_triple);
         }
 
+        // Check with .exe extension (Windows)
+        let with_triple_exe = exe_dir.join(format!("{name}-{triple}.exe"));
+        if with_triple_exe.is_file() {
+            return Ok(with_triple_exe);
+        }
+
+        // Check without triple
         let without = exe_dir.join(name);
         if without.is_file() {
             return Ok(without);
         }
 
+        // PATH fallback
         Ok(PathBuf::from(name))
     }
 

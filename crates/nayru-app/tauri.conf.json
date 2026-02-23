@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "dev.anima.nayru",
   "build": {
-    "beforeDevCommand": "cd nayru-app && bun run dev",
+    "beforeDevCommand": "cd ../nayru-app && bun run dev",
     "devUrl": "http://localhost:3002",
-    "beforeBuildCommand": "cd nayru-app && bun run build",
+    "beforeBuildCommand": "cd ../nayru-app && bun run build",
     "frontendDist": "../../nayru-app/out"
   },
   "app": {
@@ -31,6 +31,8 @@
   "bundle": {
     "active": true,
     "targets": ["appimage"],
+    "externalBin": ["binaries/koko"],
+    "resources": ["binaries/onnxruntime.dll"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

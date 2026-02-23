@@ -206,3 +206,16 @@ pub async fn set_tts_config(
 pub fn get_tts_config(state: State<'_, AppState>) -> Result<ReaderConfig, String> {
     Ok(state.config.read().unwrap().clone())
 }
+
+/// Check if the Kokoro TTS server is reachable.
+#[tauri::command]
+pub async fn get_server_status() -> Result<bool, String> {
+    let client = reqwest::Client::new();
+    let running = client
+        .get("http://127.0.0.1:3001/")
+        .timeout(std::time::Duration::from_secs(1))
+        .send()
+        .await
+        .is_ok();
+    Ok(running)
+}

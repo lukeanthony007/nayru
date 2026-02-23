@@ -7,6 +7,7 @@
 use std::sync::{Mutex, OnceLock, RwLock};
 
 use nayru_core::types::TtsConfig;
+use nayru_lib::manager::VoiceServiceManager;
 use nayru_lib::tts::TtsEngine;
 
 use crate::tracker::SentenceTracker;
@@ -15,6 +16,7 @@ pub struct AppState {
     engine: OnceLock<RwLock<TtsEngine>>,
     pub tracker: Mutex<SentenceTracker>,
     pub config: RwLock<ReaderConfig>,
+    pub service_manager: VoiceServiceManager,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -40,6 +42,7 @@ impl AppState {
             engine: OnceLock::new(),
             tracker: Mutex::new(SentenceTracker::empty()),
             config: RwLock::new(ReaderConfig::default()),
+            service_manager: VoiceServiceManager::default(),
         }
     }
 

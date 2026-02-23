@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { splitSentences } from "@/lib/sentences";
+import type { ServerPhase } from "@/lib/tts-ipc";
 
 export interface ReaderState {
   text: string;
@@ -18,6 +19,16 @@ export interface ReaderState {
     current_sentence_index: number | null;
     total_sentences: number;
   }) => void;
+
+  // Server startup status
+  serverPhase: ServerPhase;
+  serverMessage: string;
+  serverProgress: number | null;
+  setServerStatus: (
+    phase: ServerPhase,
+    message: string,
+    progress: number | null,
+  ) => void;
 }
 
 export const useReaderStore = create<ReaderState>()((set) => ({
@@ -41,4 +52,10 @@ export const useReaderStore = create<ReaderState>()((set) => ({
       currentSentenceIndex: status.current_sentence_index,
       totalSentences: status.total_sentences,
     }),
+
+  serverPhase: "checking",
+  serverMessage: "Starting Kokoro TTS...",
+  serverProgress: null,
+  setServerStatus: (phase, message, progress) =>
+    set({ serverPhase: phase, serverMessage: message, serverProgress: progress }),
 }));

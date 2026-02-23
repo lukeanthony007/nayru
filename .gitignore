@@ -6,3 +6,16 @@ nayru-app/node_modules/
 nayru-app/.next/
 nayru-app/out/
 nayru-app/bun.lock
+
+# Sidecar binaries (platform-specific, built separately)
+crates/nayru-app/binaries/*.exe
+crates/nayru-app/binaries/*.dll
+
+# Generated platform icons (regenerate with: cargo tauri icon)
+crates/nayru-app/icons/android/
+crates/nayru-app/icons/ios/
+crates/nayru-app/icons/Square*.png
+crates/nayru-app/icons/StoreLogo.png
+
+# Claude local settings
+.claude/
