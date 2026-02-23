@@ -113,6 +113,72 @@ pub fn split_text(text: &str, max_len: usize) -> Vec<String> {
     result
 }
 
+/// Split text into sentences at sentence-ending punctuation (`. `, `! `, `? `)
+/// or paragraph breaks (double newlines).
+///
+/// Returns non-empty, trimmed strings. Used by the reader app to render
+/// clickable sentence spans and by the backend `SentenceTracker` to build
+/// chunk-to-sentence mappings.
+///
+/// The TypeScript mirror is: `text.split(/(?<=[.!?])\s+|\n\n+/)` — JS regex
+/// supports lookbehind but Rust's `regex` crate does not, so we split manually.
+pub fn split_sentences(text: &str) -> Vec<String> {
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // Paragraph break: split before \n\n
+        if bytes[i] == b'\n' && i + 1 < len && bytes[i + 1] == b'\n' {
+            let chunk = text[start..i].trim();
+            if !chunk.is_empty() {
+                sentences.push(chunk.to_string());
+            }
+            // Skip all consecutive newlines
+            while i < len && bytes[i] == b'\n' {
+                i += 1;
+            }
+            start = i;
+            continue;
+        }
+
+        // Sentence-ending punctuation followed by whitespace
+        if (bytes[i] == b'.' || bytes[i] == b'!' || bytes[i] == b'?')
+            && i + 1 < len
+            && bytes[i + 1].is_ascii_whitespace()
+            && bytes[i + 1] != b'\n' || (bytes[i] == b'.' || bytes[i] == b'!' || bytes[i] == b'?')
+                && i + 1 < len
+                && bytes[i + 1] == b' '
+        {
+            let chunk = text[start..=i].trim();
+            if !chunk.is_empty() {
+                sentences.push(chunk.to_string());
+            }
+            i += 1;
+            // Skip whitespace after punctuation
+            while i < len && bytes[i].is_ascii_whitespace() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            start = i;
+            continue;
+        }
+
+        i += 1;
+    }
+
+    // Remaining text
+    if start < len {
+        let chunk = text[start..].trim();
+        if !chunk.is_empty() {
+            sentences.push(chunk.to_string());
+        }
+    }
+
+    sentences
+}
+
 /// Find a word boundary, or fall back to a hard split.
 fn word_boundary_or_hard(window: &str, max_len: usize) -> usize {
     if let Some(pos) = window.rfind(' ') {
@@ -294,5 +360,43 @@ mod tests {
     #[test]
     fn default_max_chunk_len() {
         assert_eq!(DEFAULT_MAX_CHUNK_LEN, 200);
+    }
+
+    // ── split_sentences ───────────────────────────────────────────
+
+    #[test]
+    fn split_sentences_basic() {
+        let s = split_sentences("Hello world. How are you? I am fine!");
+        assert_eq!(s, vec!["Hello world.", "How are you?", "I am fine!"]);
+    }
+
+    #[test]
+    fn split_sentences_paragraph_break() {
+        let s = split_sentences("First paragraph.\n\nSecond paragraph.");
+        assert_eq!(s, vec!["First paragraph.", "Second paragraph."]);
+    }
+
+    #[test]
+    fn split_sentences_single() {
+        let s = split_sentences("Just one sentence");
+        assert_eq!(s, vec!["Just one sentence"]);
+    }
+
+    #[test]
+    fn split_sentences_empty() {
+        let s = split_sentences("");
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn split_sentences_trims_whitespace() {
+        let s = split_sentences("  Hello.   World.  ");
+        assert_eq!(s, vec!["Hello.", "World."]);
+    }
+
+    #[test]
+    fn split_sentences_mixed_punctuation() {
+        let s = split_sentences("Really? Yes! OK. Done");
+        assert_eq!(s, vec!["Really?", "Yes!", "OK.", "Done"]);
     }
 }

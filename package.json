@@ -1,0 +1,10 @@
+{
+  "name": "nayru",
+  "private": true,
+  "scripts": {
+    "dev": "cd crates/nayru-app && cargo tauri dev",
+    "build": "cd crates/nayru-app && cargo tauri build",
+    "dev:next": "cd nayru-app && next dev -p 3002",
+    "build:next": "cd nayru-app && next build"
+  }
+}

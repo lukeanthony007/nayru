@@ -5,29 +5,15 @@ use std::sync::Arc;
 use tokio::process::Child;
 use tokio::sync::Mutex;
 
-use crate::download::{self, DownloadProgress, KOKORO_MODEL, WHISPER_MODEL};
+use nayru_core::types::{DownloadProgress, ServiceStatus, VoiceServicesStatus, KOKORO_MODEL, WHISPER_MODEL};
 
-/// Sidecar binary names (Tauri appends platform triple)
+use crate::download;
+
 const WHISPER_SIDECAR: &str = "whisper-server";
 const KOKORO_SIDECAR: &str = "kokoro-server";
 
 const WHISPER_PORT: u16 = 2022;
-const KOKORO_PORT: u16 = 8880;
-
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ServiceStatus {
-    pub model_downloaded: bool,
-    pub running: bool,
-    pub port: u16,
-}
-
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VoiceServicesStatus {
-    pub whisper: ServiceStatus,
-    pub kokoro: ServiceStatus,
-}
+const KOKORO_PORT: u16 = 3001;
 
 struct RunningService {
     child: Child,
@@ -50,7 +36,6 @@ impl Default for VoiceServiceManager {
 }
 
 impl VoiceServiceManager {
-    /// Get status of both services
     pub async fn status(&self, models_dir: &Path) -> VoiceServicesStatus {
         let whisper_model = download::model_exists(models_dir, &WHISPER_MODEL);
         let kokoro_model = download::model_exists(models_dir, &KOKORO_MODEL);
@@ -72,39 +57,33 @@ impl VoiceServiceManager {
         }
     }
 
-    /// Start both voice services. Downloads models if needed.
     pub async fn start(
         &self,
         models_dir: &Path,
         on_progress: impl Fn(DownloadProgress),
     ) -> Result<(), String> {
-        // Download models (no-op if already present)
-        let (whisper_model, kokoro_model) = download::ensure_models(models_dir, on_progress).await?;
+        let (whisper_model, kokoro_model) =
+            download::ensure_models(models_dir, on_progress).await?;
 
-        // Start whisper
         if !self.is_running(&self.whisper).await {
             self.start_whisper(&whisper_model).await?;
         }
 
-        // Start kokoro
         if !self.is_running(&self.kokoro).await {
             self.start_kokoro(&kokoro_model).await?;
         }
 
-        // Wait for services to be ready
         self.wait_for_health(WHISPER_PORT, "whisper", 15).await?;
         self.wait_for_health(KOKORO_PORT, "kokoro", 30).await?;
 
         Ok(())
     }
 
-    /// Stop all voice services
     pub async fn stop(&self) {
         self.kill_service(&self.whisper).await;
         self.kill_service(&self.kokoro).await;
     }
 
-    /// Stop all (sync-safe, for shutdown hooks)
     pub fn stop_sync(&self) {
         if let Ok(mut guard) = self.whisper.try_lock() {
             if let Some(mut svc) = guard.take() {
@@ -117,8 +96,6 @@ impl VoiceServiceManager {
             }
         }
     }
-
-    // ── Internal ──
 
     async fn start_whisper(&self, model_path: &PathBuf) -> Result<(), String> {
         let binary = self.resolve_sidecar(WHISPER_SIDECAR)?;
@@ -137,9 +114,7 @@ impl VoiceServiceManager {
             .spawn()
             .map_err(|e| format!("failed to spawn whisper-server: {e}"))?;
 
-        // Drain stderr in background
         Self::drain_stderr(child, "whisper", &self.whisper).await;
-
         Ok(())
     }
 
@@ -162,7 +137,6 @@ impl VoiceServiceManager {
             .map_err(|e| format!("failed to spawn kokoro-server: {e}"))?;
 
         Self::drain_stderr(child, "kokoro", &self.kokoro).await;
-
         Ok(())
     }
 
@@ -173,7 +147,6 @@ impl VoiceServiceManager {
     ) {
         let name_owned = name.to_string();
 
-        // Take stderr for logging
         if let Some(stderr) = child.stderr.take() {
             let name_log = name_owned.clone();
             tokio::spawn(async move {
@@ -192,7 +165,6 @@ impl VoiceServiceManager {
         });
     }
 
-    /// Resolve sidecar binary path
     fn resolve_sidecar(&self, name: &str) -> Result<PathBuf, String> {
         let exe = std::env::current_exe()
             .map_err(|e| format!("cannot determine executable path: {e}"))?;
@@ -200,31 +172,27 @@ impl VoiceServiceManager {
             .parent()
             .ok_or_else(|| "executable has no parent directory".to_string())?;
 
-        // Try with platform triple
         let triple = target_triple();
         let with_triple = exe_dir.join(format!("{name}-{triple}"));
         if with_triple.is_file() {
             return Ok(with_triple);
         }
 
-        // Try without triple
         let without = exe_dir.join(name);
         if without.is_file() {
             return Ok(without);
         }
 
-        // Try on PATH (dev mode)
         Ok(PathBuf::from(name))
     }
 
     async fn is_running(&self, slot: &Arc<Mutex<Option<RunningService>>>) -> bool {
         let mut guard = slot.lock().await;
         if let Some(ref mut svc) = *guard {
-            // Check if process is still alive
             match svc.child.try_wait() {
-                Ok(None) => true,  // still running
+                Ok(None) => true,
                 Ok(Some(_)) => {
-                    *guard = None; // exited, clean up
+                    *guard = None;
                     false
                 }
                 Err(_) => {
@@ -257,7 +225,9 @@ impl VoiceServiceManager {
 
         loop {
             if tokio::time::Instant::now() > deadline {
-                return Err(format!("{name} service did not become ready within {timeout_secs}s"));
+                return Err(format!(
+                    "{name} service did not become ready within {timeout_secs}s"
+                ));
             }
 
             match client.get(&url).send().await {
@@ -272,13 +242,23 @@ impl VoiceServiceManager {
 
 fn target_triple() -> &'static str {
     #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-    { "x86_64-unknown-linux-gnu" }
+    {
+        "x86_64-unknown-linux-gnu"
+    }
     #[cfg(all(target_arch = "aarch64", target_os = "linux"))]
-    { "aarch64-unknown-linux-gnu" }
+    {
+        "aarch64-unknown-linux-gnu"
+    }
     #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
-    { "x86_64-apple-darwin" }
+    {
+        "x86_64-apple-darwin"
+    }
     #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
-    { "aarch64-apple-darwin" }
+    {
+        "aarch64-apple-darwin"
+    }
     #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
-    { "x86_64-pc-windows-msvc" }
+    {
+        "x86_64-pc-windows-msvc"
+    }
 }

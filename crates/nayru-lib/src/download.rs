@@ -3,38 +3,7 @@
 use std::path::PathBuf;
 use tokio::io::AsyncWriteExt;
 
-/// Model definitions
-pub struct ModelInfo {
-    pub name: &'static str,
-    pub filename: &'static str,
-    pub url: &'static str,
-    pub expected_size: u64, // approximate, for progress display
-}
-
-pub const WHISPER_MODEL: ModelInfo = ModelInfo {
-    name: "whisper",
-    filename: "ggml-base.en-q5_1.bin",
-    url: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en-q5_1.bin",
-    expected_size: 57_000_000,
-};
-
-pub const KOKORO_MODEL: ModelInfo = ModelInfo {
-    name: "kokoro",
-    filename: "kokoro-v1.0-int8.onnx",
-    url: "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_quantized.onnx",
-    expected_size: 88_000_000,
-};
-
-/// Download progress payload
-#[derive(Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DownloadProgress {
-    pub model: String,
-    pub percent: f32,
-    pub bytes_done: u64,
-    pub bytes_total: u64,
-    pub status: String, // "downloading" | "complete" | "error"
-}
+use nayru_core::types::{DownloadProgress, ModelInfo, KOKORO_MODEL, WHISPER_MODEL};
 
 /// Check if a model file exists under the given models directory
 pub fn model_exists(models_dir: &std::path::Path, model: &ModelInfo) -> bool {
@@ -47,8 +16,6 @@ pub fn model_path(models_dir: &std::path::Path, model: &ModelInfo) -> PathBuf {
 }
 
 /// Download a model with progress reporting.
-///
-/// `on_progress` is called with each progress update. Pass `|_| {}` to ignore.
 pub async fn download_model(
     models_dir: &std::path::Path,
     model: &ModelInfo,
@@ -60,7 +27,6 @@ pub async fn download_model(
 
     let dest = models_dir.join(model.filename);
 
-    // Check if already downloaded
     if dest.is_file() {
         on_progress(DownloadProgress {
             model: model.name.to_string(),
@@ -72,7 +38,6 @@ pub async fn download_model(
         return Ok(dest);
     }
 
-    // Download with partial file support
     let partial = models_dir.join(format!("{}.partial", model.filename));
     let existing_size = if partial.is_file() {
         tokio::fs::metadata(&partial)
@@ -86,7 +51,6 @@ pub async fn download_model(
     let client = reqwest::Client::new();
     let mut req = client.get(model.url);
 
-    // Resume from partial download
     if existing_size > 0 {
         req = req.header("Range", format!("bytes={existing_size}-"));
     }
@@ -101,7 +65,6 @@ pub async fn download_model(
     }
 
     let total_size = if resp.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-        // Content-Range header tells us total size
         resp.headers()
             .get("content-range")
             .and_then(|v| v.to_str().ok())
@@ -141,10 +104,11 @@ pub async fn download_model(
         });
     }
 
-    file.flush().await.map_err(|e| format!("flush failed: {e}"))?;
+    file.flush()
+        .await
+        .map_err(|e| format!("flush failed: {e}"))?;
     drop(file);
 
-    // Rename partial to final
     tokio::fs::rename(&partial, &dest)
         .await
         .map_err(|e| format!("failed to finalize download: {e}"))?;

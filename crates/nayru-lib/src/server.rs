@@ -8,7 +8,9 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use tower_http::cors::CorsLayer;
 
-use crate::tts::{TtsEngine, TtsStatus};
+use nayru_core::types::TtsStatus;
+
+use crate::tts::TtsEngine;
 
 /// Build the axum router with a shared [`TtsEngine`].
 pub fn router(engine: TtsEngine) -> Router {
@@ -22,8 +24,6 @@ pub fn router(engine: TtsEngine) -> Router {
         .layer(CorsLayer::permissive())
         .with_state(engine)
 }
-
-// ─── Request / response types ──────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
 struct SpeakRequest {
@@ -43,9 +43,10 @@ struct OkResponse {
     ok: bool,
 }
 
-// ─── Handlers ──────────────────────────────────────────────────────────────
-
-async fn speak(State(engine): State<TtsEngine>, Json(req): Json<SpeakRequest>) -> Json<SpeakResponse> {
+async fn speak(
+    State(engine): State<TtsEngine>,
+    Json(req): Json<SpeakRequest>,
+) -> Json<SpeakResponse> {
     let _ = req.voice; // TODO: per-request voice override
     let n = engine.speak(&req.text);
     Json(SpeakResponse {

@@ -1,0 +1,12 @@
+[package]
+name = "nayru-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure types and text processing for nayru voice server"
+
+[dependencies]
+serde.workspace = true
+regex.workspace = true

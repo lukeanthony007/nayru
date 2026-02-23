@@ -1,0 +1,21 @@
+[package]
+name = "nayru-lib"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Voice server engine — TTS playback, STT capture, audio pipeline"
+
+[dependencies]
+nayru-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+cpal.workspace = true
+tracing.workspace = true
+futures-util.workspace = true
+rodio.workspace = true
+axum.workspace = true
+tower-http.workspace = true

@@ -1,20 +1,19 @@
-[package]
-name = "nayru"
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 authors = ["Lucas <lucas@amio.dev>"]
 license = "MIT"
 repository = "https://github.com/ln64-git/nayru"
-description = "Voice server — TTS playback, STT capture, audio pipeline"
 
-[lib]
-name = "nayru"
+[workspace.dependencies]
+# Internal
+nayru-core = { path = "crates/nayru-core" }
+nayru-lib = { path = "crates/nayru-lib" }
 
-[[bin]]
-name = "nayru"
-path = "src/main.rs"
-
-[dependencies]
 # Async
 tokio = { version = "1", features = ["full", "sync"] }
 
@@ -22,7 +21,7 @@ tokio = { version = "1", features = ["full", "sync"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# HTTP client
+# HTTP
 reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 
 # Audio
@@ -47,3 +46,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 
 # Text processing
 regex = "1"
+
+# Desktop app
+tauri = { version = "2", features = [] }
+tauri-build = { version = "2", features = [] }

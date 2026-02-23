@@ -27,10 +27,10 @@ enum Command {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
         /// Default TTS voice
-        #[arg(long, default_value = "af_jadzia")]
+        #[arg(long, default_value = "af_heart")]
         voice: String,
         /// Kokoro TTS server URL
-        #[arg(long, default_value = "http://localhost:8880")]
+        #[arg(long, default_value = "http://localhost:3001")]
         kokoro_url: String,
         /// TTS playback speed
         #[arg(long, default_value = "1.0")]
@@ -85,15 +85,15 @@ async fn main() {
             kokoro_url,
             speed,
         } => {
-            let config = nayru::tts::TtsConfig {
+            let config = nayru_lib::nayru_core::types::TtsConfig {
                 kokoro_url,
                 voice,
                 speed,
                 ..Default::default()
             };
 
-            let engine = nayru::tts::TtsEngine::new(config);
-            let app = nayru::server::router(engine);
+            let engine = nayru_lib::tts::TtsEngine::new(config);
+            let app = nayru_lib::server::router(engine);
 
             let addr = format!("{host}:{port}");
             eprintln!("nayru listening on {addr}");

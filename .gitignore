@@ -1,2 +1,8 @@
 /target
 Cargo.lock
+
+# Next.js / Node
+nayru-app/node_modules/
+nayru-app/.next/
+nayru-app/out/
+nayru-app/bun.lock

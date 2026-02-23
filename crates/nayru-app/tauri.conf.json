@@ -1,0 +1,42 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nickel-org/nickel.rs/master/examples/example_assets/schema.json",
+  "productName": "Nayru",
+  "version": "0.1.0",
+  "identifier": "dev.anima.nayru",
+  "build": {
+    "beforeDevCommand": "cd src/nayru-app && bun run dev",
+    "devUrl": "http://localhost:3002",
+    "beforeBuildCommand": "cd src/nayru-app && bun run build",
+    "frontendDist": "../../src/nayru-app/out"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Nayru",
+        "width": 800,
+        "height": 600,
+        "minWidth": 400,
+        "minHeight": 300,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "transparent": true,
+        "zoomHotkeysEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' http://localhost:3001 http://localhost:8880; font-src 'self' data:"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["appimage"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}
