@@ -21,6 +21,8 @@ pub fn router(engine: TtsEngine) -> Router {
         .route("/pause", post(pause))
         .route("/resume", post(resume))
         .route("/status", get(status))
+        .route("/stream/chunk", post(stream_chunk))
+        .route("/stream/end", post(stream_end))
         .layer(CorsLayer::permissive())
         .with_state(engine)
 }
@@ -77,4 +79,22 @@ async fn resume(State(engine): State<TtsEngine>) -> Json<OkResponse> {
 
 async fn status(State(engine): State<TtsEngine>) -> Json<TtsStatus> {
     Json(engine.status())
+}
+
+#[derive(serde::Deserialize)]
+struct StreamChunkRequest {
+    text: String,
+}
+
+async fn stream_chunk(
+    State(engine): State<TtsEngine>,
+    Json(req): Json<StreamChunkRequest>,
+) -> Json<OkResponse> {
+    engine.stream_chunk(&req.text);
+    Json(OkResponse { ok: true })
+}
+
+async fn stream_end(State(engine): State<TtsEngine>) -> Json<OkResponse> {
+    engine.stream_end();
+    Json(OkResponse { ok: true })
 }

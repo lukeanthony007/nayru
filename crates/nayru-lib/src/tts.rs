@@ -19,6 +19,11 @@
 //!
 //! Epoch-based cancellation: `stop()` bumps an [`AtomicU64`] so all in-flight
 //! work for the previous epoch is silently discarded.
+//!
+//! **Streaming API:** For LLM streaming, use `stream_chunk()` / `stream_end()`
+//! instead of `speak()`. The text_processor accumulates chunks, extracts complete
+//! sentences as they arrive, and dispatches them through the same fetch pipeline —
+//! one continuous epoch, gapless playback.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -37,9 +42,14 @@ use crate::streaming_source::{PcmChunk, StreamingSource};
 const PCM_SAMPLE_RATE: u32 = 24_000;
 const PCM_CHANNELS: u16 = 1;
 
-/// Number of concurrent fetcher tasks (pipeline depth).
-/// 2 = one active + one pre-fetching the next chunk.
-const PREFETCH_DEPTH: usize = 2;
+/// Number of concurrent fetcher tasks.
+/// 2 = one active (streaming to sink) + one pre-fetching the next chunk.
+const FETCHER_COUNT: usize = 2;
+
+/// Capacity of the fetch job channel. Must be large enough that the
+/// text_processor never blocks on send — blocking would stall StreamChunk
+/// processing and create gaps between clips.
+const FETCH_QUEUE_CAPACITY: usize = 32;
 
 /// Cloneable handle to the TTS engine. All methods are non-blocking.
 #[derive(Clone)]
@@ -54,6 +64,8 @@ pub struct TtsEngine {
 
 enum Cmd {
     Speak(String),
+    StreamChunk(String),
+    StreamEnd,
     Stop,
 }
 
@@ -83,8 +95,8 @@ impl TtsEngine {
             voice: config.voice.clone(),
         });
 
-        // Job channel — bounded to PREFETCH_DEPTH so text_processor applies backpressure
-        let (fetch_tx, fetch_rx) = mpsc::channel::<FetchJob>(PREFETCH_DEPTH);
+        // Job channel — bounded to FETCHER_COUNT so text_processor applies backpressure
+        let (fetch_tx, fetch_rx) = mpsc::channel::<FetchJob>(FETCH_QUEUE_CAPACITY);
 
         // Playback OS thread (rodio OutputStream is !Send)
         let (play_cmd_tx, play_cmd_rx) = std::sync::mpsc::channel::<PlayCmd>();
@@ -96,9 +108,9 @@ impl TtsEngine {
             })
             .expect("failed to spawn playback thread");
 
-        // Spawn PREFETCH_DEPTH fetcher tasks sharing the job channel
+        // Spawn FETCHER_COUNT fetcher tasks sharing the job channel
         let fetch_rx = Arc::new(tokio::sync::Mutex::new(fetch_rx));
-        for i in 0..PREFETCH_DEPTH {
+        for i in 0..FETCHER_COUNT {
             let fetch_rx = fetch_rx.clone();
             let epoch = epoch.clone();
             let play_cmd_tx = play_cmd_tx.clone();
@@ -168,6 +180,24 @@ impl TtsEngine {
     pub fn subscribe_status(&self) -> watch::Receiver<TtsStatus> {
         self.status_rx.clone()
     }
+
+    /// Feed a text chunk from an LLM stream. The engine accumulates text
+    /// internally, extracts complete sentences, and dispatches them through
+    /// the synthesis pipeline immediately for gapless playback.
+    ///
+    /// Text should already be cleaned (no markdown) — the caller is responsible
+    /// for preprocessing since markdown patterns span multiple chunks.
+    pub fn stream_chunk(&self, text: &str) {
+        if !text.is_empty() {
+            let _ = self.cmd_tx.send(Cmd::StreamChunk(text.to_string()));
+        }
+    }
+
+    /// Signal that the LLM stream is complete. Flushes any remaining buffered
+    /// text as a final synthesis job.
+    pub fn stream_end(&self) {
+        let _ = self.cmd_tx.send(Cmd::StreamEnd);
+    }
 }
 
 // ─── Text processor ──────────────────────────────────────────────────────
@@ -179,6 +209,10 @@ async fn text_processor_task(
     status_tx: watch::Sender<TtsStatus>,
     config: TtsConfig,
 ) {
+    // Streaming state — persists across loop iterations
+    let mut stream_buffer = String::new();
+    let mut stream_epoch: Option<u64> = None;
+
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             Cmd::Speak(text) => {
@@ -198,7 +232,7 @@ async fn text_processor_task(
 
                 let total = batched.len();
                 update_status(&status_tx, |s| {
-                    s.queue_length = total;
+                    s.queue_length += total;
                     if s.state == TtsState::Idle {
                         s.state = TtsState::Converting;
                     }
@@ -223,7 +257,88 @@ async fn text_processor_task(
                     }
                 }
             }
+
+            Cmd::StreamChunk(chunk) => {
+                // Initialize stream epoch on first chunk
+                if stream_epoch.is_none() {
+                    let e = epoch.load(Ordering::SeqCst);
+                    stream_epoch = Some(e);
+                    debug!("stream started (epoch {})", e);
+                    update_status(&status_tx, |s| {
+                        if s.state == TtsState::Idle {
+                            s.state = TtsState::Converting;
+                        }
+                    });
+                }
+
+                let current_epoch = stream_epoch.unwrap();
+                if epoch.load(Ordering::SeqCst) != current_epoch {
+                    // Stream was stopped — discard
+                    stream_buffer.clear();
+                    stream_epoch = None;
+                    continue;
+                }
+
+                stream_buffer.push_str(&chunk);
+
+                // Extract and dispatch complete sentences
+                dispatch_stream_sentences(
+                    &mut stream_buffer,
+                    current_epoch,
+                    &fetch_tx,
+                    &epoch,
+                    &status_tx,
+                    &config,
+                )
+                .await;
+            }
+
+            Cmd::StreamEnd => {
+                debug!("stream end — buffer={} chars", stream_buffer.len());
+                if let Some(current_epoch) = stream_epoch.take() {
+                    if epoch.load(Ordering::SeqCst) == current_epoch {
+                        // Flush remaining buffer as final chunk(s)
+                        let remaining = stream_buffer.trim().to_string();
+                        if remaining.len() >= 2
+                            && remaining.chars().any(|c| c.is_alphanumeric())
+                        {
+                            let chunks = if remaining.len() <= config.max_chunk_len {
+                                vec![remaining]
+                            } else {
+                                split_text(&remaining, config.max_chunk_len)
+                            };
+
+                            let count = chunks.len();
+                            update_status(&status_tx, |s| {
+                                s.queue_length += count;
+                            });
+
+                            debug!("stream: flushing {} final chunk(s)", count);
+
+                            for text in chunks {
+                                if epoch.load(Ordering::SeqCst) != current_epoch {
+                                    break;
+                                }
+                                if fetch_tx
+                                    .send(FetchJob {
+                                        text,
+                                        epoch: current_epoch,
+                                    })
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                stream_buffer.clear();
+            }
+
             Cmd::Stop => {
+                stream_buffer.clear();
+                stream_epoch = None;
                 update_status(&status_tx, |s| {
                     s.queue_length = 0;
                     s.state = TtsState::Idle;
@@ -233,7 +348,91 @@ async fn text_processor_task(
     }
 }
 
-// ─── Fetcher task (PREFETCH_DEPTH instances share the job channel) ───────
+/// Extract complete sentences from the stream buffer and dispatch them as FetchJobs.
+/// Leaves the incomplete tail (last element from split_sentences) in the buffer.
+async fn dispatch_stream_sentences(
+    buffer: &mut String,
+    current_epoch: u64,
+    fetch_tx: &mpsc::Sender<FetchJob>,
+    epoch: &Arc<AtomicU64>,
+    status_tx: &watch::Sender<TtsStatus>,
+    config: &TtsConfig,
+) {
+    let sentences = split_sentences(buffer);
+
+    if sentences.len() <= 1 {
+        // Zero or one sentence — might be incomplete. Don't dispatch yet.
+        // Exception: if buffer is very long without punctuation, force-split.
+        if buffer.len() >= config.max_chunk_len * 2 {
+            let split_at = buffer[..config.max_chunk_len]
+                .rfind(' ')
+                .unwrap_or(config.max_chunk_len);
+            let chunk = buffer[..split_at].trim().to_string();
+            let tail = buffer[split_at..].trim_start().to_string();
+            *buffer = tail;
+
+            if chunk.len() >= 2 {
+                update_status(status_tx, |s| {
+                    s.queue_length += 1;
+                });
+                debug!("stream: force-split dispatch ({} chars)", chunk.len());
+                let _ = fetch_tx
+                    .send(FetchJob {
+                        text: chunk,
+                        epoch: current_epoch,
+                    })
+                    .await;
+            }
+        }
+        return;
+    }
+
+    // All sentences except the last are complete — dispatch them.
+    // Keep the last (potentially incomplete) sentence in the buffer.
+    let last = sentences.last().unwrap().clone();
+    let complete = &sentences[..sentences.len() - 1];
+
+    let mut to_dispatch: Vec<String> = Vec::new();
+    for sentence in complete {
+        if sentence.len() <= config.max_chunk_len {
+            to_dispatch.push(sentence.clone());
+        } else {
+            to_dispatch.extend(split_text(sentence, config.max_chunk_len));
+        }
+    }
+
+    if !to_dispatch.is_empty() {
+        let count = to_dispatch.len();
+        update_status(status_tx, |s| {
+            s.queue_length += count;
+        });
+
+        for text in &to_dispatch {
+            debug!("stream: dispatch sentence ({} chars)", text.len());
+        }
+
+        for text in to_dispatch {
+            if epoch.load(Ordering::SeqCst) != current_epoch {
+                break;
+            }
+            if fetch_tx
+                .send(FetchJob {
+                    text,
+                    epoch: current_epoch,
+                })
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    }
+
+    // Replace buffer with the incomplete tail
+    *buffer = last;
+}
+
+// ─── Fetcher task (FETCHER_COUNT instances share the job channel) ───────
 
 async fn fetcher_task(
     worker_id: usize,
@@ -280,15 +479,14 @@ async fn fetcher_task(
             "speed": speed,
         });
 
-        let fetch_t0 = std::time::Instant::now();
-        debug!("fetch[{worker_id}]: POST {} chars to {url}", job.text.len());
+        debug!("fetch[{worker_id}]: POST {} chars", job.text.len());
 
         let resp = match client.post(&url).json(&body).send().await {
             Ok(resp) if resp.status().is_success() => resp,
             Ok(resp) => {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
-                error!("fetch[{worker_id}]: Kokoro returned {status}: {text}");
+                error!("fetch[{worker_id}]: Kokoro error {status}: {text}");
                 continue;
             }
             Err(e) => {
@@ -297,22 +495,18 @@ async fn fetcher_task(
             }
         };
 
-        debug!("fetch[{worker_id}]: headers in {:?}", fetch_t0.elapsed());
-
         if job.epoch != epoch.load(Ordering::SeqCst) {
-            debug!("fetch[{worker_id}]: discarding stale response");
+            debug!("fetch[{worker_id}]: stale response, discarding");
             continue;
         }
 
         // Stream PCM data — create source on first chunk
         let mut stream = resp.bytes_stream();
         let mut leftover: Option<u8> = None;
-        let mut total_samples = 0usize;
         let mut pcm_tx: Option<std::sync::mpsc::Sender<PcmChunk>> = None;
 
         while let Some(chunk_result) = stream.next().await {
             if job.epoch != epoch.load(Ordering::SeqCst) {
-                debug!("fetch[{worker_id}]: discarding stale stream");
                 break;
             }
 
@@ -326,15 +520,8 @@ async fn fetcher_task(
 
             let (samples, lo) = bytes_to_i16(&chunk, leftover.take());
             leftover = lo;
-            total_samples += samples.len();
 
             if pcm_tx.is_none() && !samples.is_empty() {
-                debug!(
-                    "fetch[{worker_id}]: first PCM, {} samples in {:?}",
-                    samples.len(),
-                    fetch_t0.elapsed()
-                );
-
                 let (tx, rx) = std::sync::mpsc::channel();
                 let source = StreamingSource::new(rx, PCM_CHANNELS, PCM_SAMPLE_RATE);
                 let _ = tx.send(PcmChunk::Data(samples));
@@ -362,12 +549,6 @@ async fn fetcher_task(
         update_status(&status_tx, |s| {
             s.queue_length = s.queue_length.saturating_sub(1);
         });
-
-        debug!(
-            "fetch[{worker_id}]: complete, {} samples in {:?}",
-            total_samples,
-            fetch_t0.elapsed()
-        );
     }
 }
 
