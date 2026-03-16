@@ -150,7 +150,9 @@ impl Drop for AudioCapture {
 // Audio processing helpers
 // ---------------------------------------------------------------------------
 
-/// Mix multi-channel audio to mono by averaging channels.
+/// Mix multi-channel audio to mono by picking the loudest sample per frame.
+/// Using max-abs instead of average prevents signal loss when only 1-2 channels
+/// carry audio (e.g. a 2-input interface mapped to 4-channel surround).
 fn mix_to_mono(input: &[i16], channels: u16) -> Vec<i16> {
     if channels <= 1 {
         return input.to_vec();
@@ -159,8 +161,11 @@ fn mix_to_mono(input: &[i16], channels: u16) -> Vec<i16> {
     input
         .chunks_exact(ch)
         .map(|frame| {
-            let sum: i32 = frame.iter().map(|&s| s as i32).sum();
-            (sum / channels as i32) as i16
+            frame
+                .iter()
+                .copied()
+                .max_by_key(|&s| (s as i32).unsigned_abs())
+                .unwrap_or(0)
         })
         .collect()
 }
@@ -200,8 +205,16 @@ mod tests {
 
     #[test]
     fn test_mix_to_mono_stereo() {
+        // Picks loudest (max absolute) per frame
         let input = vec![100, 200, 300, 400];
-        assert_eq!(mix_to_mono(&input, 2), vec![150, 350]);
+        assert_eq!(mix_to_mono(&input, 2), vec![200, 400]);
+    }
+
+    #[test]
+    fn test_mix_to_mono_sparse_channels() {
+        // 4-channel frame where only channel 1 has signal (like EVO4)
+        let input = vec![0, 500, 0, 0, 0, -800, 0, 0];
+        assert_eq!(mix_to_mono(&input, 4), vec![500, -800]);
     }
 
     #[test]

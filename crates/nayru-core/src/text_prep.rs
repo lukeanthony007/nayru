@@ -85,7 +85,10 @@ pub fn split_text(text: &str, max_len: usize) -> Vec<String> {
     let mut remaining = text;
 
     while remaining.len() > max_len {
-        let window = &remaining[..max_len];
+        // Find the largest char boundary <= max_len so we never split inside
+        // a multi-byte UTF-8 character (e.g. em dash '—').
+        let safe_end = floor_char_boundary(remaining, max_len);
+        let window = &remaining[..safe_end];
 
         // Prefer sentence boundary (". ")
         let split_at = if let Some(pos) = window.rfind(". ") {
@@ -179,14 +182,27 @@ pub fn split_sentences(text: &str) -> Vec<String> {
     sentences
 }
 
-/// Find a word boundary, or fall back to a hard split.
-fn word_boundary_or_hard(window: &str, max_len: usize) -> usize {
+/// Find a word boundary, or fall back to a hard split at a char boundary.
+fn word_boundary_or_hard(window: &str, _max_len: usize) -> usize {
     if let Some(pos) = window.rfind(' ') {
-        if pos >= max_len / 3 {
+        if pos >= window.len() / 3 {
             return pos;
         }
     }
-    max_len
+    window.len()
+}
+
+/// Return the largest index `<= idx` that is a UTF-8 char boundary in `s`.
+fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    if idx >= s.len() {
+        return s.len();
+    }
+    // Walk backwards (at most 3 bytes for a 4-byte char) to find a boundary.
+    let mut i = idx;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 #[cfg(test)]
@@ -360,6 +376,19 @@ mod tests {
     #[test]
     fn default_max_chunk_len() {
         assert_eq!(DEFAULT_MAX_CHUNK_LEN, 200);
+    }
+
+    #[test]
+    fn split_text_multibyte_char_boundary() {
+        // Em dash '—' is 3 bytes (U+2014). Place it so that max_len falls
+        // inside the character to verify we don't panic.
+        let text = format!("{}—rest of text", "a".repeat(199));
+        // max_len=200 would land inside '—' (bytes 199..202)
+        let chunks = split_text(&text, 200);
+        assert!(chunks.len() >= 2);
+        // All chunks must be valid UTF-8 (implicit — String guarantees this)
+        let rejoined: String = chunks.join(" ");
+        assert!(rejoined.contains('—'));
     }
 
     // ── split_sentences ───────────────────────────────────────────

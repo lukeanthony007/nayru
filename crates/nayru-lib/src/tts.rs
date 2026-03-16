@@ -31,7 +31,7 @@ use std::sync::Arc;
 use futures_util::StreamExt;
 use rodio::{OutputStream, Sink};
 use tokio::sync::{mpsc, watch};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use nayru_core::text_prep::{clean_text_for_tts, split_sentences, split_text, DEFAULT_MAX_CHUNK_LEN};
 use nayru_core::types::{TtsConfig, TtsState, TtsStatus};
@@ -50,6 +50,12 @@ const FETCHER_COUNT: usize = 2;
 /// text_processor never blocks on send — blocking would stall StreamChunk
 /// processing and create gaps between clips.
 const FETCH_QUEUE_CAPACITY: usize = 32;
+
+/// Max retries per job when Kokoro returns an error or empty response.
+const FETCH_MAX_RETRIES: u32 = 2;
+
+/// Backoff between retries (doubles each attempt).
+const FETCH_RETRY_BASE_MS: u64 = 250;
 
 /// Cloneable handle to the TTS engine. All methods are non-blocking.
 #[derive(Clone)]
@@ -481,16 +487,43 @@ async fn fetcher_task(
 
         debug!("fetch[{worker_id}]: POST {} chars", job.text.len());
 
-        let resp = match client.post(&url).json(&body).send().await {
-            Ok(resp) if resp.status().is_success() => resp,
-            Ok(resp) => {
-                let status = resp.status();
-                let text = resp.text().await.unwrap_or_default();
-                error!("fetch[{worker_id}]: Kokoro error {status}: {text}");
-                continue;
+        // Retry loop — koko can silently degrade (empty replies) after long uptime.
+        // Retry with backoff before giving up on this job.
+        let mut resp_opt = None;
+        for attempt in 0..=FETCH_MAX_RETRIES {
+            if job.epoch != epoch.load(Ordering::SeqCst) {
+                break;
             }
-            Err(e) => {
-                error!("fetch[{worker_id}]: request failed: {e}");
+
+            if attempt > 0 {
+                let backoff = FETCH_RETRY_BASE_MS * (1 << (attempt - 1));
+                warn!("fetch[{worker_id}]: retry {attempt}/{FETCH_MAX_RETRIES} in {backoff}ms");
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+            }
+
+            match client.post(&url).json(&body).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    resp_opt = Some(resp);
+                    break;
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    let text = resp.text().await.unwrap_or_default();
+                    error!("fetch[{worker_id}]: Kokoro error {status}: {text}");
+                }
+                Err(e) => {
+                    error!("fetch[{worker_id}]: request failed: {e}");
+                }
+            }
+        }
+
+        let resp = match resp_opt {
+            Some(r) => r,
+            None => {
+                error!("fetch[{worker_id}]: all retries exhausted, dropping job");
+                update_status(&status_tx, |s| {
+                    s.queue_length = s.queue_length.saturating_sub(1);
+                });
                 continue;
             }
         };
@@ -504,6 +537,7 @@ async fn fetcher_task(
         let mut stream = resp.bytes_stream();
         let mut leftover: Option<u8> = None;
         let mut pcm_tx: Option<std::sync::mpsc::Sender<PcmChunk>> = None;
+        let mut got_data = false;
 
         while let Some(chunk_result) = stream.next().await {
             if job.epoch != epoch.load(Ordering::SeqCst) {
@@ -522,6 +556,7 @@ async fn fetcher_task(
             leftover = lo;
 
             if pcm_tx.is_none() && !samples.is_empty() {
+                got_data = true;
                 let (tx, rx) = std::sync::mpsc::channel();
                 let source = StreamingSource::new(rx, PCM_CHANNELS, PCM_SAMPLE_RATE);
                 let _ = tx.send(PcmChunk::Data(samples));
@@ -534,12 +569,19 @@ async fn fetcher_task(
             }
 
             if !samples.is_empty() {
+                got_data = true;
                 if let Some(ref tx) = pcm_tx {
                     if tx.send(PcmChunk::Data(samples)).is_err() {
                         break;
                     }
                 }
             }
+        }
+
+        // Empty-reply detection: HTTP 200 but zero PCM data = koko is degraded.
+        // Log prominently so it's visible in diagnostics.
+        if !got_data && job.epoch == epoch.load(Ordering::SeqCst) {
+            warn!("fetch[{worker_id}]: Kokoro returned 200 but no PCM data — server may be degraded");
         }
 
         if let Some(tx) = pcm_tx.take() {
