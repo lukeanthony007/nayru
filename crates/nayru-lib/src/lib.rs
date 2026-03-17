@@ -5,6 +5,7 @@
 
 pub mod capture;
 pub mod download;
+pub mod kokoro;
 pub mod manager;
 pub mod server;
 pub mod streaming_source;

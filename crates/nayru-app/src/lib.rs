@@ -6,6 +6,7 @@ pub mod commands;
 pub mod state;
 pub mod tracker;
 
+use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
 /// Configure and run the Tauri application.
@@ -17,8 +18,6 @@ pub fn run() {
         )
         .init();
 
-    // AppState::new() is cheap — engine is lazily created on first use
-    // (from an async command where the tokio runtime is guaranteed).
     tauri::Builder::default()
         .manage(state::AppState::new())
         .invoke_handler(tauri::generate_handler![
@@ -35,22 +34,16 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                start_kokoro_server(handle).await;
+                load_kokoro_model(handle).await;
             });
             Ok(())
         })
         .build(tauri::generate_context!())
         .expect("error building tauri application")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::Exit = event {
-                let state = app_handle.state::<state::AppState>();
-                state.service_manager.stop_kokoro_sync();
-                tracing::info!("kokoro server stopped on exit");
-            }
-        });
+        .run(|_app_handle, _event| {});
 }
 
-async fn start_kokoro_server(handle: tauri::AppHandle) {
+async fn load_kokoro_model(handle: tauri::AppHandle) {
     use nayru_core::types::ServerStartupEvent;
 
     let emit = |phase: &str, message: &str, progress: Option<f32>| {
@@ -66,34 +59,30 @@ async fn start_kokoro_server(handle: tauri::AppHandle) {
 
     let state = handle.state::<state::AppState>();
 
-    // Check if Kokoro is already running externally
-    emit("checking", "Checking for Kokoro TTS server...", None);
-    if state.service_manager.is_kokoro_reachable().await {
-        tracing::info!("kokoro server already running on port 3001");
-        emit("ready", "Kokoro TTS server is ready", None);
-        return;
-    }
-
     // Resolve models directory
     let models_dir = match handle.path().app_data_dir() {
         Ok(dir) => dir.join("models"),
         Err(e) => {
-            emit("error", &format!("Failed to resolve app data dir: {e}"), None);
+            emit(
+                "error",
+                &format!("Failed to resolve app data dir: {e}"),
+                None,
+            );
             return;
         }
     };
 
-    // Start Kokoro: download model + spawn server + health check
+    // Download model files if needed
     emit("downloading", "Preparing Kokoro TTS model...", Some(0.0));
     let emit_handle = handle.clone();
     let result = state
         .service_manager
-        .start_kokoro_only(&models_dir, move |progress| {
+        .ensure_kokoro_models(&models_dir, move |progress| {
             let _ = emit_handle.emit(
                 "server-startup",
                 ServerStartupEvent {
                     phase: if progress.status == "complete" {
-                        "starting".to_string()
+                        "loading".to_string()
                     } else {
                         "downloading".to_string()
                     },
@@ -104,14 +93,29 @@ async fn start_kokoro_server(handle: tauri::AppHandle) {
         })
         .await;
 
-    match result {
-        Ok(()) => {
-            emit("ready", "Kokoro TTS server is ready", None);
-            tracing::info!("kokoro server started successfully");
+    let (model_path, voices_path) = match result {
+        Ok(paths) => paths,
+        Err(e) => {
+            emit("error", &format!("Failed to download models: {e}"), None);
+            tracing::error!("failed to download kokoro models: {e}");
+            return;
+        }
+    };
+
+    // Load the ONNX model into memory
+    emit("loading", "Loading Kokoro TTS model...", None);
+    tracing::info!("loading kokoro model from {}", model_path.display());
+    let t0 = std::time::Instant::now();
+
+    match nayru_lib::kokoro::KokoroSynth::new(&model_path, &voices_path).await {
+        Ok(kokoro) => {
+            tracing::info!("kokoro model loaded in {:?}", t0.elapsed());
+            state.set_kokoro(Arc::new(kokoro));
+            emit("ready", "Kokoro TTS is ready", None);
         }
         Err(e) => {
-            emit("error", &format!("Failed to start Kokoro: {e}"), None);
-            tracing::error!("failed to start kokoro server: {e}");
+            emit("error", &format!("Failed to load Kokoro model: {e}"), None);
+            tracing::error!("failed to load kokoro model: {e}");
         }
     }
 }

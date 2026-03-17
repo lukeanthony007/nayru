@@ -47,6 +47,12 @@ tower-http = { version = "0.6", features = ["cors"] }
 # Text processing
 regex = "1"
 
+# TTS inference (in-process ONNX)
+kokoro-tts = "0.3"
+ort = "=2.0.0-rc.11"
+ndarray = "0.17"
+bincode = "2.0"
+
 # Desktop app
 tauri = { version = "2", features = [] }
 tauri-build = { version = "2", features = [] }

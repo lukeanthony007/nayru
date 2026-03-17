@@ -23,30 +23,37 @@ pub struct ReaderStatus {
 pub struct TtsConfigPatch {
     pub voice: Option<String>,
     pub speed: Option<f32>,
-    pub kokoro_url: Option<String>,
+}
+
+fn engine_or_err(state: &AppState) -> Result<&std::sync::RwLock<TtsEngine>, String> {
+    state.engine().ok_or_else(|| "TTS engine not ready (model still loading)".to_string())
 }
 
 fn build_status(state: &AppState) -> ReaderStatus {
-    let t0 = std::time::Instant::now();
-    let engine = state.engine().read().unwrap();
-    let status = engine.status();
-    drop(engine);
-    tracing::debug!("build_status: engine status in {:?}", t0.elapsed());
-
     let tracker = state.tracker.lock().unwrap();
     let config = state.config.read().unwrap();
 
-    let chunks_completed = tracker.total_chunks.saturating_sub(status.queue_length);
-    let current_sentence_index = if status.state != nayru_core::types::TtsState::Idle {
-        tracker.current_sentence(chunks_completed)
-    } else {
-        None
-    };
+    let (state_str, current_sentence_index) = match state.engine() {
+        Some(lock) => {
+            let engine = lock.read().unwrap();
+            let status = engine.status();
+            drop(engine);
 
-    let state_str = match status.state {
-        nayru_core::types::TtsState::Idle => "idle",
-        nayru_core::types::TtsState::Converting => "converting",
-        nayru_core::types::TtsState::Playing => "playing",
+            let chunks_completed = tracker.total_chunks.saturating_sub(status.queue_length);
+            let idx = if status.state != nayru_core::types::TtsState::Idle {
+                tracker.current_sentence(chunks_completed)
+            } else {
+                None
+            };
+
+            let s = match status.state {
+                nayru_core::types::TtsState::Idle => "idle",
+                nayru_core::types::TtsState::Converting => "converting",
+                nayru_core::types::TtsState::Playing => "playing",
+            };
+            (s, idx)
+        }
+        None => ("idle", None),
     };
 
     ReaderStatus {
@@ -58,7 +65,6 @@ fn build_status(state: &AppState) -> ReaderStatus {
     }
 }
 
-/// Start speaking from a specific sentence index.
 #[tauri::command]
 pub async fn speak_from(
     text: String,
@@ -68,20 +74,12 @@ pub async fn speak_from(
     let t0 = std::time::Instant::now();
     tracing::info!("speak_from: idx={sentence_index} text_len={}", text.len());
 
-    // Stop any current speech
-    state.engine().read().unwrap().stop();
-    tracing::info!("speak_from: stop() in {:?}", t0.elapsed());
+    engine_or_err(&state)?.read().unwrap().stop();
 
-    // Build tracker
     let tracker = SentenceTracker::new(&text, sentence_index);
     let to_speak: String = tracker.sentences.join(" ");
-    tracing::info!("speak_from: tracker built, {} sentences, speaking {} chars", tracker.sentences.len(), to_speak.len());
 
-    // Speak
-    state.engine().read().unwrap().speak(&to_speak);
-    tracing::info!("speak_from: speak() dispatched in {:?}", t0.elapsed());
-
-    // Store tracker
+    engine_or_err(&state)?.read().unwrap().speak(&to_speak);
     *state.tracker.lock().unwrap() = tracker;
 
     let status = build_status(&state);
@@ -89,34 +87,31 @@ pub async fn speak_from(
     Ok(status)
 }
 
-/// Stop all speech.
 #[tauri::command]
 pub async fn tts_stop(state: State<'_, AppState>) -> Result<(), String> {
-    state.engine().read().unwrap().stop();
+    engine_or_err(&state)?.read().unwrap().stop();
     *state.tracker.lock().unwrap() = SentenceTracker::empty();
     Ok(())
 }
 
-/// Pause playback.
 #[tauri::command]
 pub fn tts_pause(state: State<'_, AppState>) -> Result<(), String> {
-    state.engine().read().unwrap().pause();
+    engine_or_err(&state)?.read().unwrap().pause();
     Ok(())
 }
 
-/// Resume playback.
 #[tauri::command]
 pub fn tts_resume(state: State<'_, AppState>) -> Result<(), String> {
-    state.engine().read().unwrap().resume();
+    engine_or_err(&state)?.read().unwrap().resume();
     Ok(())
 }
 
-/// Skip to the next sentence.
 #[tauri::command]
 pub async fn tts_skip_sentence(state: State<'_, AppState>) -> Result<ReaderStatus, String> {
-    // Compute next index — read engine status, then drop guard before .await
+    let engine = engine_or_err(&state)?;
+
     let (next_index, full_text) = {
-        let status = state.engine().read().unwrap().status();
+        let status = engine.read().unwrap().status();
         let tracker = state.tracker.lock().unwrap();
 
         let chunks_completed = tracker.total_chunks.saturating_sub(status.queue_length);
@@ -129,30 +124,25 @@ pub async fn tts_skip_sentence(state: State<'_, AppState>) -> Result<ReaderStatu
 
     let all_sentences = split_sentences(&full_text);
     if next_index >= all_sentences.len() {
-        state.engine().read().unwrap().stop();
+        engine.read().unwrap().stop();
         *state.tracker.lock().unwrap() = SentenceTracker::empty();
         return Ok(build_status(&state));
     }
 
-    // Re-speak from next sentence
-    state.engine().read().unwrap().stop();
-
+    engine.read().unwrap().stop();
     let tracker = SentenceTracker::new(&full_text, next_index);
     let to_speak: String = tracker.sentences.join(" ");
-
-    state.engine().read().unwrap().speak(&to_speak);
+    engine.read().unwrap().speak(&to_speak);
     *state.tracker.lock().unwrap() = tracker;
 
     Ok(build_status(&state))
 }
 
-/// Get current reader status (polled by frontend).
 #[tauri::command]
 pub async fn get_reader_status(state: State<'_, AppState>) -> Result<ReaderStatus, String> {
     Ok(build_status(&state))
 }
 
-/// Update TTS config. Recreates the engine if settings changed.
 #[tauri::command]
 pub async fn set_tts_config(
     patch: TtsConfigPatch,
@@ -174,24 +164,25 @@ pub async fn set_tts_config(
                 changed = true;
             }
         }
-        if let Some(url) = patch.kokoro_url {
-            if url != config.kokoro_url {
-                config.kokoro_url = url;
-                changed = true;
-            }
-        }
 
         if changed {
-            Some(TtsEngine::new(TtsConfig {
-                kokoro_url: config.kokoro_url.clone(),
-                voice: config.voice.clone(),
-                speed: config.speed,
-                ..Default::default()
-            }))
+            let kokoro = state
+                .kokoro
+                .get()
+                .ok_or("Kokoro model not loaded")?
+                .clone();
+            Some(TtsEngine::new(
+                TtsConfig {
+                    voice: config.voice.clone(),
+                    speed: config.speed,
+                    ..Default::default()
+                },
+                kokoro,
+            ))
         } else {
             None
         }
-    }; // config guard dropped here
+    };
 
     if let Some(engine) = new_engine {
         state.replace_engine(engine);
@@ -201,21 +192,12 @@ pub async fn set_tts_config(
     Ok(())
 }
 
-/// Get current TTS config.
 #[tauri::command]
 pub fn get_tts_config(state: State<'_, AppState>) -> Result<ReaderConfig, String> {
     Ok(state.config.read().unwrap().clone())
 }
 
-/// Check if the Kokoro TTS server is reachable.
 #[tauri::command]
-pub async fn get_server_status() -> Result<bool, String> {
-    let client = reqwest::Client::new();
-    let running = client
-        .get("http://127.0.0.1:3001/")
-        .timeout(std::time::Duration::from_secs(1))
-        .send()
-        .await
-        .is_ok();
-    Ok(running)
+pub async fn get_server_status(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.kokoro.get().is_some())
 }

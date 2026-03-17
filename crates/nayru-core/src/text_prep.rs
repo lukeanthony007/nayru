@@ -32,11 +32,87 @@ static RE_DOUBLE_DOT: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\.\s*\.").unwrap());
 static RE_MULTI_SPACE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s{2,}").unwrap());
+static RE_NUMBER: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\d+(\.\d+)?").unwrap());
+
+/// Convert a number string to English words.
+///
+/// Handles integers and decimals. Keeps it simple: spells out common small
+/// numbers directly, falls back to digit-by-digit for very large numbers.
+/// This prevents kokoro-tts's g2p from converting numbers to Chinese.
+fn number_to_words(s: &str) -> String {
+    const ONES: &[&str] = &[
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+        "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+        "seventeen", "eighteen", "nineteen",
+    ];
+    const TENS: &[&str] = &[
+        "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    ];
+
+    fn int_to_words(n: u64) -> String {
+        if n < 20 {
+            return ONES[n as usize].to_string();
+        }
+        if n < 100 {
+            let t = TENS[(n / 10) as usize].to_string();
+            if n % 10 == 0 { t } else { format!("{} {}", t, ONES[(n % 10) as usize]) }
+        } else if n < 1000 {
+            let h = format!("{} hundred", ONES[(n / 100) as usize]);
+            if n % 100 == 0 { h } else { format!("{} {}", h, int_to_words(n % 100)) }
+        } else if n < 1_000_000 {
+            let t = format!("{} thousand", int_to_words(n / 1000));
+            if n % 1000 == 0 { t } else { format!("{} {}", t, int_to_words(n % 1000)) }
+        } else if n < 1_000_000_000 {
+            let m = format!("{} million", int_to_words(n / 1_000_000));
+            if n % 1_000_000 == 0 { m } else { format!("{} {}", m, int_to_words(n % 1_000_000)) }
+        } else {
+            // For very large numbers, just read digits
+            n.to_string()
+                .chars()
+                .map(|c| ONES[c.to_digit(10).unwrap_or(0) as usize])
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+    }
+
+    if let Some((integer_part, decimal_part)) = s.split_once('.') {
+        let int_val: u64 = integer_part.parse().unwrap_or(0);
+        let int_words = int_to_words(int_val);
+        let dec_words: String = decimal_part
+            .chars()
+            .map(|c| ONES[c.to_digit(10).unwrap_or(0) as usize])
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{} point {}", int_words, dec_words)
+    } else {
+        let n: u64 = s.parse().unwrap_or(0);
+        int_to_words(n)
+    }
+}
+
+/// Replace digit sequences with English words so kokoro-tts doesn't
+/// convert them to Chinese via its internal `num_repr`.
+fn numbers_to_english(text: &str) -> String {
+    RE_NUMBER
+        .replace_all(text, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap();
+            let words = number_to_words(&caps[0]);
+            // Add leading space if preceded by a letter (e.g. "H1" → "H one" not "Hone")
+            if m.start() > 0 && text.as_bytes()[m.start() - 1].is_ascii_alphabetic() {
+                format!(" {}", words)
+            } else {
+                words
+            }
+        })
+        .into_owned()
+}
 
 /// Strip markdown formatting so text reads naturally when spoken.
 ///
 /// Handles: fenced code blocks, tables, inline code, bold/italic,
 /// headings, links, bullets/numbered lists, horizontal rules.
+/// Also converts numbers to English words for proper TTS pronunciation.
 pub fn clean_text_for_tts(text: &str) -> String {
     let mut c = text.to_string();
 
@@ -63,6 +139,8 @@ pub fn clean_text_for_tts(text: &str) -> String {
     c = RE_LEADING_DOT.replace(&c, "").into_owned();
     // Double periods → single
     c = RE_DOUBLE_DOT.replace_all(&c, ".").into_owned();
+    // Numbers → English words (before kokoro's g2p converts them to Chinese)
+    c = numbers_to_english(&c);
     // Collapse whitespace
     c = RE_MULTI_SPACE.replace_all(&c, " ").into_owned();
 
@@ -246,7 +324,7 @@ mod tests {
     #[test]
     fn strips_headings() {
         assert_eq!(clean_text_for_tts("## Hello World"), "Hello World");
-        assert_eq!(clean_text_for_tts("# H1\n## H2"), "H1\nH2");
+        assert_eq!(clean_text_for_tts("# H1\n## H2"), "H one\nH two");
     }
 
     #[test]
@@ -313,6 +391,28 @@ mod tests {
             clean_text_for_tts("Hello, how are you today?"),
             "Hello, how are you today?"
         );
+    }
+
+    #[test]
+    fn converts_numbers_to_english() {
+        assert_eq!(clean_text_for_tts("I have 3 apples"), "I have three apples");
+        assert_eq!(clean_text_for_tts("There are 42 items"), "There are forty two items");
+        assert_eq!(clean_text_for_tts("The price is 3.14"), "The price is three point one four");
+        assert_eq!(clean_text_for_tts("100 percent"), "one hundred percent");
+        assert_eq!(clean_text_for_tts("In 2024, we shipped 15 features"), "In two thousand twenty four, we shipped fifteen features");
+    }
+
+    #[test]
+    fn number_to_words_basic() {
+        assert_eq!(number_to_words("0"), "zero");
+        assert_eq!(number_to_words("1"), "one");
+        assert_eq!(number_to_words("13"), "thirteen");
+        assert_eq!(number_to_words("50"), "fifty");
+        assert_eq!(number_to_words("99"), "ninety nine");
+        assert_eq!(number_to_words("100"), "one hundred");
+        assert_eq!(number_to_words("256"), "two hundred fifty six");
+        assert_eq!(number_to_words("1000"), "one thousand");
+        assert_eq!(number_to_words("1500"), "one thousand five hundred");
     }
 
     // ── split_text ──────────────────────────────────────────────────

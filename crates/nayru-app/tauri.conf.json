@@ -25,14 +25,13 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' http://localhost:3001; font-src 'self' data:"
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self' data:"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["appimage"],
-    "externalBin": ["binaries/koko"],
-    "resources": [],
+        "resources": [],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

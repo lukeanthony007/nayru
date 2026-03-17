@@ -6,6 +6,8 @@
 //! nayru stop / skip / pause / resume / status [--server ...]
 //! ```
 
+use std::sync::Arc;
+
 use clap::{Parser, Subcommand};
 
 /// nayru — voice server with TTS playback
@@ -29,12 +31,15 @@ enum Command {
         /// Default TTS voice
         #[arg(long, default_value = "af_heart")]
         voice: String,
-        /// Kokoro TTS server URL
-        #[arg(long, default_value = "http://localhost:3001")]
-        kokoro_url: String,
         /// TTS playback speed
         #[arg(long, default_value = "1.0")]
         speed: f32,
+        /// Path to kokoro ONNX model file
+        #[arg(long)]
+        model: String,
+        /// Path to kokoro voices file
+        #[arg(long)]
+        voices: String,
     },
     /// Send text to the running server for speech
     Speak {
@@ -82,17 +87,26 @@ async fn main() {
             port,
             host,
             voice,
-            kokoro_url,
             speed,
+            model,
+            voices,
         } => {
+            eprintln!("loading kokoro model...");
+            let kokoro = nayru_lib::kokoro::KokoroSynth::new(
+                std::path::Path::new(&model),
+                std::path::Path::new(&voices),
+            )
+            .await
+            .expect("failed to load kokoro model");
+            let kokoro = Arc::new(kokoro);
+
             let config = nayru_lib::nayru_core::types::TtsConfig {
-                kokoro_url,
                 voice,
                 speed,
                 ..Default::default()
             };
 
-            let engine = nayru_lib::tts::TtsEngine::new(config);
+            let engine = nayru_lib::tts::TtsEngine::new(config, kokoro);
             let app = nayru_lib::server::router(engine);
 
             let addr = format!("{host}:{port}");

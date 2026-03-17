@@ -12,7 +12,6 @@ use serde::{Deserialize, Serialize};
 /// TTS engine configuration.
 #[derive(Debug, Clone)]
 pub struct TtsConfig {
-    pub kokoro_url: String,
     pub voice: String,
     pub speed: f32,
     pub max_chunk_len: usize,
@@ -21,7 +20,6 @@ pub struct TtsConfig {
 impl Default for TtsConfig {
     fn default() -> Self {
         Self {
-            kokoro_url: "http://localhost:3001".into(),
             voice: "af_heart".into(),
             speed: 1.0,
             max_chunk_len: DEFAULT_MAX_CHUNK_LEN,
@@ -85,14 +83,14 @@ pub const WHISPER_MODEL: ModelInfo = ModelInfo {
 pub const KOKORO_MODEL: ModelInfo = ModelInfo {
     name: "kokoro",
     filename: "kokoro-v1.0.onnx",
-    url: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx",
+    url: "https://github.com/mzdk100/kokoro/releases/download/V1.0/kokoro-v1.0.onnx",
     expected_size: 326_000_000,
 };
 
 pub const KOKORO_VOICES: ModelInfo = ModelInfo {
     name: "kokoro-voices",
-    filename: "voices-v1.0.bin",
-    url: "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+    filename: "voices.bin",
+    url: "https://github.com/mzdk100/kokoro/releases/download/V1.0/voices.bin",
     expected_size: 5_200_000,
 };
 

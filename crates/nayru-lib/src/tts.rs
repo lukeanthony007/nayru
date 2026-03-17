@@ -1,21 +1,20 @@
-//! TTS engine — text queue → pipelined Kokoro fetch → rodio playback.
+//! TTS engine — text queue → in-process Kokoro inference → rodio playback.
 //!
 //! Pipeline:
 //!
 //! ```text
 //! speak("text") → [cmd_tx] → text_processor: split sentences
-//!     → [fetch_tx] → fetcher_0: POST Kokoro, stream PCM, create source on first data
-//!     → [fetch_tx] → fetcher_1: (prefetch) POST Kokoro concurrently
+//!     → [fetch_tx] → fetcher_0: KokoroTts::synth(), create source
+//!     → [fetch_tx] → fetcher_1: (prefetch) synth concurrently
 //!     → playback thread: gapless sequential playback
 //! ```
 //!
 //! Two fetcher tasks consume from a shared job channel. While fetcher_0 streams
-//! the current sentence to the sink, fetcher_1 pre-fetches the next sentence from
-//! Kokoro. This overlaps synthesis with playback — by the time sentence 1 finishes
+//! the current sentence to the sink, fetcher_1 pre-fetches the next sentence.
+//! This overlaps synthesis with playback — by the time sentence 1 finishes
 //! playing, sentence 2 is usually ready or nearly ready.
 //!
 //! Sentences are dispatched individually (no merging) to minimize time-to-first-audio.
-//! Kokoro's internal smart_split handles its own chunking.
 //!
 //! Epoch-based cancellation: `stop()` bumps an [`AtomicU64`] so all in-flight
 //! work for the previous epoch is silently discarded.
@@ -28,34 +27,27 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use futures_util::StreamExt;
 use rodio::{OutputStream, Sink};
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, warn};
+
+use crate::kokoro::KokoroSynth;
 
 use nayru_core::text_prep::{clean_text_for_tts, split_sentences, split_text, DEFAULT_MAX_CHUNK_LEN};
 use nayru_core::types::{TtsConfig, TtsState, TtsStatus};
 
 use crate::streaming_source::{PcmChunk, StreamingSource};
 
-/// Kokoro PCM streaming format: 24 kHz mono 16-bit signed LE.
+/// Kokoro PCM output: 24 kHz mono.
 const PCM_SAMPLE_RATE: u32 = 24_000;
 const PCM_CHANNELS: u16 = 1;
 
 /// Number of concurrent fetcher tasks.
-/// 2 = one active (streaming to sink) + one pre-fetching the next chunk.
+/// 2 = one active (synthesizing current) + one pre-fetching the next chunk.
 const FETCHER_COUNT: usize = 2;
 
-/// Capacity of the fetch job channel. Must be large enough that the
-/// text_processor never blocks on send — blocking would stall StreamChunk
-/// processing and create gaps between clips.
+/// Capacity of the fetch job channel.
 const FETCH_QUEUE_CAPACITY: usize = 32;
-
-/// Max retries per job when Kokoro returns an error or empty response.
-const FETCH_MAX_RETRIES: u32 = 2;
-
-/// Backoff between retries (doubles each attempt).
-const FETCH_RETRY_BASE_MS: u64 = 250;
 
 /// Cloneable handle to the TTS engine. All methods are non-blocking.
 #[derive(Clone)]
@@ -88,11 +80,21 @@ enum PlayCmd {
     Resume,
 }
 
+/// Convert f32 samples [-1.0, 1.0] to i16 PCM.
+fn f32_to_i16(samples: &[f32]) -> Vec<i16> {
+    samples
+        .iter()
+        .map(|&s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+        .collect()
+}
+
 // ─── Engine construction ───────────────────────────────────────────────────
 
 impl TtsEngine {
     /// Spawn the TTS pipeline. Returns a cloneable handle.
-    pub fn new(config: TtsConfig) -> Self {
+    ///
+    /// `kokoro` must be a pre-loaded KokoroSynth instance (model + voices loaded).
+    pub fn new(config: TtsConfig, kokoro: Arc<KokoroSynth>) -> Self {
         let epoch = Arc::new(AtomicU64::new(0));
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = watch::channel(TtsStatus {
@@ -101,7 +103,7 @@ impl TtsEngine {
             voice: config.voice.clone(),
         });
 
-        // Job channel — bounded to FETCHER_COUNT so text_processor applies backpressure
+        // Job channel
         let (fetch_tx, fetch_rx) = mpsc::channel::<FetchJob>(FETCH_QUEUE_CAPACITY);
 
         // Playback OS thread (rodio OutputStream is !Send)
@@ -121,11 +123,11 @@ impl TtsEngine {
             let epoch = epoch.clone();
             let play_cmd_tx = play_cmd_tx.clone();
             let status_tx = status_tx.clone();
-            let kokoro_url = config.kokoro_url.clone();
+            let kokoro = kokoro.clone();
             let voice = config.voice.clone();
             let speed = config.speed;
             tokio::spawn(async move {
-                fetcher_task(i, fetch_rx, play_cmd_tx, epoch, status_tx, &kokoro_url, &voice, speed)
+                fetcher_task(i, fetch_rx, play_cmd_tx, epoch, status_tx, kokoro, &voice, speed)
                     .await;
             });
         }
@@ -187,20 +189,14 @@ impl TtsEngine {
         self.status_rx.clone()
     }
 
-    /// Feed a text chunk from an LLM stream. The engine accumulates text
-    /// internally, extracts complete sentences, and dispatches them through
-    /// the synthesis pipeline immediately for gapless playback.
-    ///
-    /// Text should already be cleaned (no markdown) — the caller is responsible
-    /// for preprocessing since markdown patterns span multiple chunks.
+    /// Feed a text chunk from an LLM stream.
     pub fn stream_chunk(&self, text: &str) {
         if !text.is_empty() {
             let _ = self.cmd_tx.send(Cmd::StreamChunk(text.to_string()));
         }
     }
 
-    /// Signal that the LLM stream is complete. Flushes any remaining buffered
-    /// text as a final synthesis job.
+    /// Signal that the LLM stream is complete.
     pub fn stream_end(&self) {
         let _ = self.cmd_tx.send(Cmd::StreamEnd);
     }
@@ -215,7 +211,6 @@ async fn text_processor_task(
     status_tx: watch::Sender<TtsStatus>,
     config: TtsConfig,
 ) {
-    // Streaming state — persists across loop iterations
     let mut stream_buffer = String::new();
     let mut stream_epoch: Option<u64> = None;
 
@@ -224,8 +219,6 @@ async fn text_processor_task(
             Cmd::Speak(text) => {
                 let current_epoch = epoch.load(Ordering::SeqCst);
 
-                // Split into sentences, then sub-split any that exceed max_chunk_len.
-                // Each sentence is dispatched individually to minimize first-audio latency.
                 let sentences = split_sentences(&text);
                 let mut batched: Vec<String> = Vec::new();
                 for sentence in sentences {
@@ -265,7 +258,6 @@ async fn text_processor_task(
             }
 
             Cmd::StreamChunk(chunk) => {
-                // Initialize stream epoch on first chunk
                 if stream_epoch.is_none() {
                     let e = epoch.load(Ordering::SeqCst);
                     stream_epoch = Some(e);
@@ -279,7 +271,6 @@ async fn text_processor_task(
 
                 let current_epoch = stream_epoch.unwrap();
                 if epoch.load(Ordering::SeqCst) != current_epoch {
-                    // Stream was stopped — discard
                     stream_buffer.clear();
                     stream_epoch = None;
                     continue;
@@ -287,7 +278,6 @@ async fn text_processor_task(
 
                 stream_buffer.push_str(&chunk);
 
-                // Extract and dispatch complete sentences
                 dispatch_stream_sentences(
                     &mut stream_buffer,
                     current_epoch,
@@ -303,7 +293,6 @@ async fn text_processor_task(
                 debug!("stream end — buffer={} chars", stream_buffer.len());
                 if let Some(current_epoch) = stream_epoch.take() {
                     if epoch.load(Ordering::SeqCst) == current_epoch {
-                        // Flush remaining buffer as final chunk(s)
                         let remaining = stream_buffer.trim().to_string();
                         if remaining.len() >= 2
                             && remaining.chars().any(|c| c.is_alphanumeric())
@@ -354,8 +343,6 @@ async fn text_processor_task(
     }
 }
 
-/// Extract complete sentences from the stream buffer and dispatch them as FetchJobs.
-/// Leaves the incomplete tail (last element from split_sentences) in the buffer.
 async fn dispatch_stream_sentences(
     buffer: &mut String,
     current_epoch: u64,
@@ -367,8 +354,6 @@ async fn dispatch_stream_sentences(
     let sentences = split_sentences(buffer);
 
     if sentences.len() <= 1 {
-        // Zero or one sentence — might be incomplete. Don't dispatch yet.
-        // Exception: if buffer is very long without punctuation, force-split.
         if buffer.len() >= config.max_chunk_len * 2 {
             let split_at = buffer[..config.max_chunk_len]
                 .rfind(' ')
@@ -393,8 +378,6 @@ async fn dispatch_stream_sentences(
         return;
     }
 
-    // All sentences except the last are complete — dispatch them.
-    // Keep the last (potentially incomplete) sentence in the buffer.
     let last = sentences.last().unwrap().clone();
     let complete = &sentences[..sentences.len() - 1];
 
@@ -434,11 +417,10 @@ async fn dispatch_stream_sentences(
         }
     }
 
-    // Replace buffer with the incomplete tail
     *buffer = last;
 }
 
-// ─── Fetcher task (FETCHER_COUNT instances share the job channel) ───────
+// ─── Fetcher task (in-process Kokoro synthesis) ────────────────────────────
 
 async fn fetcher_task(
     worker_id: usize,
@@ -446,15 +428,13 @@ async fn fetcher_task(
     play_cmd_tx: std::sync::mpsc::Sender<PlayCmd>,
     epoch: Arc<AtomicU64>,
     status_tx: watch::Sender<TtsStatus>,
-    kokoro_url: &str,
-    voice: &str,
+    kokoro: Arc<KokoroSynth>,
+    voice_name: &str,
     speed: f32,
 ) {
-    let client = reqwest::Client::new();
-    let url = format!("{kokoro_url}/v1/audio/speech");
+    let voice_name = voice_name.to_string();
 
     loop {
-        // Acquire lock to take next job — only one fetcher holds the lock at a time
         let job = {
             let mut rx = fetch_rx.lock().await;
             rx.recv().await
@@ -462,7 +442,7 @@ async fn fetcher_task(
 
         let job = match job {
             Some(j) => j,
-            None => break, // channel closed
+            None => break,
         };
 
         if job.epoch != epoch.load(Ordering::SeqCst) {
@@ -476,148 +456,53 @@ async fn fetcher_task(
             }
         });
 
-        let body = serde_json::json!({
-            "input": job.text,
-            "voice": voice,
-            "model": "kokoro",
-            "response_format": "pcm",
-            "stream": true,
-            "speed": speed,
-        });
+        debug!("fetch[{worker_id}]: synth {} chars", job.text.len());
 
-        debug!("fetch[{worker_id}]: POST {} chars", job.text.len());
-
-        // Retry loop — koko can silently degrade (empty replies) after long uptime.
-        // Retry with backoff before giving up on this job.
-        let mut resp_opt = None;
-        for attempt in 0..=FETCH_MAX_RETRIES {
-            if job.epoch != epoch.load(Ordering::SeqCst) {
-                break;
-            }
-
-            if attempt > 0 {
-                let backoff = FETCH_RETRY_BASE_MS * (1 << (attempt - 1));
-                warn!("fetch[{worker_id}]: retry {attempt}/{FETCH_MAX_RETRIES} in {backoff}ms");
-                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-            }
-
-            match client.post(&url).json(&body).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    resp_opt = Some(resp);
-                    break;
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    error!("fetch[{worker_id}]: Kokoro error {status}: {text}");
-                }
-                Err(e) => {
-                    error!("fetch[{worker_id}]: request failed: {e}");
-                }
-            }
-        }
-
-        let resp = match resp_opt {
-            Some(r) => r,
-            None => {
-                error!("fetch[{worker_id}]: all retries exhausted, dropping job");
-                update_status(&status_tx, |s| {
-                    s.queue_length = s.queue_length.saturating_sub(1);
-                });
-                continue;
-            }
-        };
+        let result = kokoro.synth(&job.text, &voice_name, speed).await;
 
         if job.epoch != epoch.load(Ordering::SeqCst) {
-            debug!("fetch[{worker_id}]: stale response, discarding");
+            debug!("fetch[{worker_id}]: stale after synth, discarding");
+            update_status(&status_tx, |s| {
+                s.queue_length = s.queue_length.saturating_sub(1);
+            });
             continue;
         }
 
-        // Stream PCM data — create source on first chunk
-        let mut stream = resp.bytes_stream();
-        let mut leftover: Option<u8> = None;
-        let mut pcm_tx: Option<std::sync::mpsc::Sender<PcmChunk>> = None;
-        let mut got_data = false;
+        match result {
+            Ok((samples_f32, took)) => {
+                debug!(
+                    "fetch[{worker_id}]: synthesized {} samples in {:?}",
+                    samples_f32.len(),
+                    took
+                );
 
-        while let Some(chunk_result) = stream.next().await {
-            if job.epoch != epoch.load(Ordering::SeqCst) {
-                break;
-            }
-
-            let chunk = match chunk_result {
-                Ok(c) => c,
-                Err(e) => {
-                    error!("fetch[{worker_id}]: stream error: {e}");
-                    break;
+                if samples_f32.is_empty() {
+                    warn!("fetch[{worker_id}]: kokoro returned empty audio");
+                    update_status(&status_tx, |s| {
+                        s.queue_length = s.queue_length.saturating_sub(1);
+                    });
+                    continue;
                 }
-            };
 
-            let (samples, lo) = bytes_to_i16(&chunk, leftover.take());
-            leftover = lo;
-
-            if pcm_tx.is_none() && !samples.is_empty() {
-                got_data = true;
+                let samples_i16 = f32_to_i16(&samples_f32);
                 let (tx, rx) = std::sync::mpsc::channel();
                 let source = StreamingSource::new(rx, PCM_CHANNELS, PCM_SAMPLE_RATE);
-                let _ = tx.send(PcmChunk::Data(samples));
+                let _ = tx.send(PcmChunk::Data(samples_i16));
+                let _ = tx.send(PcmChunk::Done);
 
                 if play_cmd_tx.send(PlayCmd::PlayStream(source)).is_err() {
                     break;
                 }
-                pcm_tx = Some(tx);
-                continue;
             }
-
-            if !samples.is_empty() {
-                got_data = true;
-                if let Some(ref tx) = pcm_tx {
-                    if tx.send(PcmChunk::Data(samples)).is_err() {
-                        break;
-                    }
-                }
+            Err(e) => {
+                error!("fetch[{worker_id}]: synthesis failed: {e}");
             }
-        }
-
-        // Empty-reply detection: HTTP 200 but zero PCM data = koko is degraded.
-        // Log prominently so it's visible in diagnostics.
-        if !got_data && job.epoch == epoch.load(Ordering::SeqCst) {
-            warn!("fetch[{worker_id}]: Kokoro returned 200 but no PCM data — server may be degraded");
-        }
-
-        if let Some(tx) = pcm_tx.take() {
-            let _ = tx.send(PcmChunk::Done);
         }
 
         update_status(&status_tx, |s| {
             s.queue_length = s.queue_length.saturating_sub(1);
         });
     }
-}
-
-/// Convert raw bytes to i16 PCM samples (little-endian).
-fn bytes_to_i16(bytes: &[u8], leftover: Option<u8>) -> (Vec<i16>, Option<u8>) {
-    let mut data: Vec<u8>;
-    let slice = if let Some(lo) = leftover {
-        data = Vec::with_capacity(1 + bytes.len());
-        data.push(lo);
-        data.extend_from_slice(bytes);
-        &data[..]
-    } else {
-        bytes
-    };
-
-    let mut samples = Vec::with_capacity(slice.len() / 2);
-    for pair in slice.chunks_exact(2) {
-        samples.push(i16::from_le_bytes([pair[0], pair[1]]));
-    }
-
-    let remainder = if slice.len() % 2 == 1 {
-        Some(slice[slice.len() - 1])
-    } else {
-        None
-    };
-
-    (samples, remainder)
 }
 
 // ─── Playback OS thread ───────────────────────────────────────────────────
@@ -685,41 +570,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bytes_to_i16_basic() {
-        let bytes = [0x01, 0x00, 0xFF, 0x7F]; // 1, 32767
-        let (samples, lo) = bytes_to_i16(&bytes, None);
-        assert_eq!(samples, vec![1, 32767]);
-        assert_eq!(lo, None);
+    fn f32_to_i16_conversion() {
+        let samples = vec![0.0, 1.0, -1.0, 0.5, -0.5];
+        let result = f32_to_i16(&samples);
+        assert_eq!(result, vec![0, 32767, -32767, 16383, -16383]);
     }
 
     #[test]
-    fn bytes_to_i16_with_leftover() {
-        let bytes = [0x01, 0x00, 0xFF];
-        let (samples, lo) = bytes_to_i16(&bytes, None);
-        assert_eq!(samples, vec![1]);
-        assert_eq!(lo, Some(0xFF));
+    fn f32_to_i16_clamps() {
+        let samples = vec![1.5, -1.5];
+        let result = f32_to_i16(&samples);
+        assert_eq!(result, vec![32767, -32768]);
     }
 
     #[test]
-    fn bytes_to_i16_carry_leftover() {
-        let bytes = [0x7F, 0x01, 0x00];
-        let (samples, lo) = bytes_to_i16(&bytes, Some(0xFF));
-        assert_eq!(samples, vec![32767, 1]);
-        assert_eq!(lo, None);
+    fn parse_voice_known() {
+        let v = parse_voice("af_heart", 1.0);
+        assert!(matches!(v, Voice::AfHeart(_)));
     }
 
     #[test]
-    fn bytes_to_i16_empty() {
-        let (samples, lo) = bytes_to_i16(&[], None);
-        assert!(samples.is_empty());
-        assert_eq!(lo, None);
+    fn parse_voice_unknown_falls_back() {
+        let v = parse_voice("nonexistent_voice", 1.0);
+        assert!(matches!(v, Voice::AfHeart(_)));
     }
-
-    #[test]
-    fn bytes_to_i16_single_byte() {
-        let (samples, lo) = bytes_to_i16(&[0x42], None);
-        assert!(samples.is_empty());
-        assert_eq!(lo, Some(0x42));
-    }
-
 }
