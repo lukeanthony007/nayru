@@ -8,8 +8,7 @@ nayru-app/out/
 nayru-app/bun.lock
 
 # Sidecar binaries (platform-specific, built separately)
-crates/nayru-app/binaries/*.exe
-crates/nayru-app/binaries/*.dll
+crates/nayru-app/binaries/
 
 # Generated platform icons (regenerate with: cargo tauri icon)
 crates/nayru-app/icons/android/
