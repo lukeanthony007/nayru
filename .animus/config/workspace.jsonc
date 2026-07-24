@@ -1,0 +1,16 @@
+{
+  // .animus workspace config — docs/design/animus-workspace-convention.md
+  "memory": {
+    // "augment": this project's continuity (sessions/days/movements/journal) → global
+    //            ~/.animus; its knowledge graph → this .animus. Your arc tracks across
+    //            projects. (default)
+    // "siloed":  everything stays in this .animus — a self-contained project.
+    "scope": "augment"
+  },
+  "temporal": {
+    // the journal / planner / calendar spine: time as nested movements.
+    "enabled": true,
+    // coarsest unit to roll sessions up into: day | week | month | year
+    "granularity": "day"
+  }
+}

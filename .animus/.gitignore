@@ -1,0 +1,17 @@
+# .animus/ — managed by Animus. Ignore the built, rebuildable world-model + sessions
+# (all under memory/), the zeroclaw runtime data, the editor data, and any secrets;
+# the committed recipes live under config/. docs/design/animus-workspace-convention.md
+memory/
+data/
+shared/
+editor/
+generated/
+.generated/
+chats/
+config/credentials/
+provider.json
+credentials.json
+auth-profiles.json
+auth-*-pending.json
+config.toml
+.secret_key

@@ -5,7 +5,6 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-authors = ["Lucas <lucas@amio.dev>"]
 license = "MIT"
 repository = "https://github.com/ln64-git/nayru"
 
